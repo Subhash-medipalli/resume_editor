@@ -1,0 +1,22 @@
+Contract Sr. AI/ML Engineer (independent contractor)
+
+6-month remote contract. Join an existing banking/healthcare AI team shipping
+production RAG and agentic workflows. Surgical overlap with documented
+experience only — do not invent a new stack.
+
+Must-haves already expected of a senior AI/ML engineer:
+- Python and Java (Spring Boot) services around model serving
+- LLM applications with LangChain / LangGraph, RAG, embeddings, vector search
+- AWS Bedrock and/or Azure AI Foundry
+- Docker and Kubernetes (EKS or AKS)
+- Responsible AI, RBAC, audit logging, human-in-the-loop controls
+
+Nice-to-haves:
+- CrewAI or AutoGen multi-agent workflows
+- Pinecone, FAISS, or OpenSearch
+- SageMaker Pipelines / Azure ML
+- MongoDB for agent state and document-processing metadata
+
+You will work with compliance and engineering partners on grounded document
+Q&A, evaluation (precision/recall/latency), and controlled production release.
+This is a scoped contractor engagement, not a platform rewrite.

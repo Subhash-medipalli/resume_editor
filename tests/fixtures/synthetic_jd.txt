@@ -1,0 +1,20 @@
+Contract Backend / Platform Engineer (independent contractor)
+
+We need a contractor who can join an existing AWS-hosted platform team and ship
+Python services without a long ramp. This is a 6-month contract, remote.
+
+Must-haves:
+- Python services and REST APIs
+- AWS (EC2, S3, IAM, CloudWatch)
+- Docker and a practical CI/CD path (GitHub Actions is fine)
+- PostgreSQL
+- Comfortable as an independent contractor on a scoped engagement
+
+Nice-to-haves:
+- Redis
+- infrastructure-as-code experience
+- on-call / production support habits
+
+You will ingest partner events, keep batch jobs from double-processing, and
+work with the platform team on IAM and S3 practices. We do not need you to
+rebuild the org or invent a new stack.

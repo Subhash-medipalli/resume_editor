@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
+  <title>Resume tailor</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #f4f5f7;
+      color: #111;
+      font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .sub { margin: 0 0 20px; color: #555; }
+    label { display: block; font-weight: 700; margin: 0 0 8px; }
+    textarea {
+      display: block;
+      width: 100%;
+      min-height: 220px;
+      padding: 12px;
+      border: 2px solid #111;
+      border-radius: 8px;
+      background: #fff;
+      color: #111;
+      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .actions { display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+    button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      font: 700 18px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      padding: 16px 22px;
+      cursor: pointer;
+      min-height: 52px;
+    }
+    button[type="submit"] {
+      background: #155dfc;
+      color: #fff;
+      flex: 1 1 240px;
+    }
+    button[type="submit"]:disabled { background: #8aa6f8; cursor: wait; }
+    button.secondary {
+      background: #fff;
+      color: #111;
+      border: 2px solid #111;
+    }
+    .status { margin-top: 12px; min-height: 1.3em; }
+    .status.ok { color: #0b7a3b; font-weight: 700; }
+    .status.bad { color: #b00020; font-weight: 700; }
+    .score {
+      display: none;
+      margin-top: 16px;
+      padding: 14px 16px;
+      background: #fff;
+      border: 2px solid #111;
+      border-radius: 8px;
+    }
+    .score.show { display: block; }
+    .score b { font-size: 32px; }
+    a.dl { display: inline-block; margin-top: 10px; font-weight: 700; color: #155dfc; }
+    h2 { margin: 28px 0 8px; font-size: 16px; }
+    pre {
+      margin: 0;
+      padding: 12px;
+      background: #fff;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      white-space: pre-wrap;
+      font: 13px/1.5 ui-monospace, Menlo, monospace;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Resume tailor</h1>
+    <p class="sub">Paste the job description, then click the blue button. You get a new Word file and a match score. The original resume is not overwritten.</p>
+    <form id="form">
+      <label for="jd">1. Paste job description</label>
+      <textarea id="jd" name="jd" required placeholder="Paste the full job description here"></textarea>
+      <div class="actions">
+        <button type="submit" id="go">2. Tailor resume</button>
+        <button type="button" class="secondary" id="reset">Reset</button>
+      </div>
+    </form>
+    <div class="status" id="status"></div>
+    <div class="score" id="scorebox">
+      <div><b id="score">—</b> / 100 match</div>
+      <div id="matchline" style="margin-top:6px;color:#444"></div>
+      <a class="dl" id="dl" href="/api/download" hidden>Download Word resume</a>
+    </div>
+    <h2>Changelog</h2>
+    <pre id="log">Nothing yet. Paste a JD and click Tailor resume.</pre>
+  </div>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    async function post(url, body) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : "{}",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      return data;
+    }
+    $("form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const jd = $("jd").value.trim();
+      if (!jd) { $("status").textContent = "Paste a job description first."; $("status").className = "status bad"; return; }
+      $("go").disabled = true;
+      $("status").textContent = "Tailoring… this can take a minute.";
+      $("status").className = "status";
+      // Clear the previous run before starting a new one, so a failure can
+      // never leave the last job's score and download link on screen.
+      $("scorebox").classList.remove("show");
+      $("dl").hidden = true;
+      $("log").textContent = "Working…";
+      try {
+        const data = await post("/api/tailor", { jd });
+        $("log").textContent = data.changelog || "(no changelog)";
+        if (data.match_score != null) {
+          $("score").textContent = data.match_score;
+          $("matchline").textContent = data.match_line || "";
+          $("scorebox").classList.add("show");
+        }
+        const dl = $("dl");
+        if (data.download) { dl.hidden = false; dl.href = data.download + "?t=" + Date.now(); }
+        else { dl.hidden = true; }
+        if (data.score_inferred) {
+          $("matchline").textContent =
+            "(score inferred from wording — the model gave no number) " +
+            ($("matchline").textContent || "");
+        }
+        $("status").textContent = data.ok
+          ? (data.changed_lines
+              ? `Done — ${data.changed_lines} line(s) changed. Download the Word file below.`
+              : "Done, but nothing changed: the file is identical to your original.")
+          : "Guardrails blocked the write. Parent resume unchanged.";
+        $("status").className = data.ok ? "status ok" : "status bad";
+      } catch (err) {
+        $("log").textContent = "Nothing was produced for this run.";
+        $("status").textContent = err.message;
+        $("status").className = "status bad";
+      } finally {
+        $("go").disabled = false;
+      }
+    });
+    $("reset").onclick = async () => {
+      $("reset").disabled = true;
+      try {
+        const data = await post("/api/reset");
+        $("log").textContent = data.message || "Reset.";
+        $("status").textContent = "Original resume restored.";
+        $("status").className = "status ok";
+      } catch (err) {
+        $("status").textContent = err.message;
+        $("status").className = "status bad";
+      } finally {
+        $("reset").disabled = false;
+      }
+    };
+  </script>
+</body>
+</html>
