@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
-exec python -m resume_tailor "$@"
+exec uv run python -m resume_tailor "$@"

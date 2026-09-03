@@ -14,7 +14,7 @@ When the user pastes a job description:
 
 1. Save it to `out/jd.txt`.
 2. From the project root, run:
-   `.venv/bin/python -m resume_tailor --jd out/jd.txt`
+   `uv run python -m resume_tailor --jd out/jd.txt`
 3. Show `out/CHANGELOG.md` (and `out/resume.diff` if useful).
 4. The parent resume is never modified; the result is a new file at
    `out/Sravya_M_resume_tailored.docx`.

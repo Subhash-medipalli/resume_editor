@@ -41,18 +41,22 @@ The match score is the model’s honest 0–100 against the JD must-haves (years
 
 ## Requirements
 
-- Python 3.11+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) — installs Python 3.11+ if needed
 - An API key for an OpenAI-compatible chat model (NVIDIA `nvapi-…` or OpenAI `sk-…`)
 - The parent resume as a Word file in `resume/` (this repo ships `resume/Sravya_M_resume.docx`)
+
+Install uv once:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
 ## Run it (someone new, without the original builder)
 
 From the repo root:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+uv sync
 cp .env.example .env
 ```
 
@@ -82,7 +86,7 @@ OPENAI_MODEL=gpt-5.6-terra
 Start the UI:
 
 ```bash
-python -m resume_tailor --serve
+uv run python -m resume_tailor --serve
 ```
 
 Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Paste a job description. Click the blue **Tailor resume** button. Wait (NVIDIA Ultra with thinking can take a couple of minutes). Download the Word file from the page, or grab `out/Sravya_M_resume_tailored.docx`.
@@ -92,14 +96,14 @@ Safari: hard-refresh with **Cmd-Shift-R** if the page looks stale. The UI is a s
 Another port:
 
 ```bash
-python -m resume_tailor --serve --port 8787
+uv run python -m resume_tailor --serve --port 8787
 ```
 
 CLI (same backend, no browser):
 
 ```bash
-python -m resume_tailor --jd path/to/jd.txt
-python -m resume_tailor --jd -                 # paste JD, then Ctrl-D
+uv run python -m resume_tailor --jd path/to/jd.txt
+uv run python -m resume_tailor --jd -                 # paste JD, then Ctrl-D
 ```
 
 ## What it will change
@@ -148,8 +152,7 @@ file instead.
 ## Tests
 
 ```bash
-pip install -e ".[dev]"
-pytest
+uv run pytest
 ```
 
 Tests mock the LLM and use fake fixtures only. No network. No production resume
