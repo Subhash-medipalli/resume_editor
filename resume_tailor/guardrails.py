@@ -183,9 +183,11 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     # listed, but nothing in code enforced it — a run added "GitOps" to a skills
     # line and passed clean.
     base_tech = _known_vocabulary(base_n)
-    for token in sorted(
-        token for token in _technology_tokens(out) if token.lower() not in base_tech
-    ):
+    invented = {}
+    for token in _technology_tokens(out):
+        if _stem(token) not in base_tech:
+            invented.setdefault(_stem(token), token)
+    for token in sorted(invented.values()):
         report.violations.append(
             f"Invented technology {token!r} is not on the base resume."
         )
@@ -193,12 +195,26 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     # the base resume is a new claim about what the candidate can do, which is
     # the fabrication this tool exists to prevent — even when the word looks
     # ordinary ("Runbooks", "Alerting").
-    already = {token.lower() for token in _technology_tokens(out)}
-    new_skills = sorted(
-        token
-        for token in _skill_line_tokens(out)
-        if token.lower() not in base_tech and token.lower() not in already
-    )
+    already = {_stem(token) for token in _technology_tokens(out)}
+
+    def evidenced(token: str) -> bool:
+        stem = _stem(token)
+        if stem in base_tech or stem in already:
+            return True
+        # ponytail: prefix match so "Evals" is vouched for by "evaluation" and
+        # "Alerting" by "alerts". Swap for a synonym list if it lets a fake through.
+        return len(stem) >= 4 and any(known.startswith(stem) for known in base_tech)
+
+    new_skills = sorted({
+        _stem(token): token for token in _skill_line_tokens(out) if not evidenced(token)
+    }.values())
+    lost = sorted({_stem(t): t for t in _skill_line_tokens(base_n)}.items())
+    kept = {_stem(t) for t in _skill_line_tokens(out)} | {_stem(t) for t in _technology_tokens(out)}
+    lost = [t for stem, t in lost if stem not in kept and stem in {_stem(x) for x in _skill_line_tokens(base_n)}]
+    if lost:
+        report.warnings.append(
+            "Skills dropped from a skills line — make sure that was intended: " + ", ".join(lost[:12])
+        )
     if new_skills:
         report.violations.append(
             "Skill terms added that are not on the base resume: "
@@ -265,9 +281,19 @@ def check_changelog_matches_diff(
     first run: the model listed five concrete changes and the delivered file was
     byte-identical to the original.
     """
-    if changed_line_count > 0 or not changelog:
+    if not changelog:
         return []
-    if all(NO_CHANGE_RE.search(item) for item in changelog):
+    claims = [item for item in changelog if not NO_CHANGE_RE.search(item)]
+    # ponytail: crude ratio; a model listing 4 edits that touched 1 line is
+    # narrating work it did not do. Tighten to per-claim matching if it misfires.
+    if changed_line_count == 1 and len(claims) >= 3:
+        return [
+            f"The changelog lists {len(claims)} edits but only 1 line changed. "
+            "The changelog does not describe this file — do not trust it."
+        ]
+    if changed_line_count > 0:
+        return []
+    if not claims:
         return []  # the model reported making no changes, and made none
     return [
         f"The changelog lists {len(changelog)} change(s) but the tailored resume "
@@ -490,6 +516,12 @@ def _skill_line_tokens(text: str) -> set[str]:
     return found
 
 
+def _stem(token: str) -> str:
+    """"SLO" and "SLOs" are one claim, not two."""
+    low = token.lower().strip(".")
+    return low[:-1] if len(low) > 3 and low.endswith("s") else low
+
+
 def _known_vocabulary(text: str) -> set[str]:
     """Every capitalised or technology-shaped token in the base resume.
 
@@ -497,14 +529,16 @@ def _known_vocabulary(text: str) -> set[str]:
     the base only ever uses in prose ("Application Insights" inside a bullet) is
     not reported as invented when the model surfaces it on a skills line.
     """
-    tokens = {token.lower() for token in _technology_tokens(text)}
-    tokens |= {token.lower() for token in _skill_line_tokens(text)}
-    capitalised = re.findall(r"\b[A-Z][A-Za-z0-9+#.]{1,}\b", text)
-    tokens |= {token.lower().strip(".") for token in capitalised}
+    tokens = {_stem(token) for token in _technology_tokens(text)}
+    tokens |= {_stem(token) for token in _skill_line_tokens(text)}
+    # Every word in any case: "human-in-the-loop" in a bullet is evidence for
+    # "Human-in-the-Loop" on a skills line. Only capitalised words were learned
+    # before, so ordinary prose could not vouch for its own vocabulary.
+    tokens |= {_stem(word) for word in re.findall(r"[A-Za-z][A-Za-z0-9+#.]{1,}", text)}
     # Products get written both ways ("Llama Index" / "LlamaIndex"), and a
     # respacing is not a new claim.
     for pair in re.findall(r"\b([A-Z][A-Za-z0-9+#.]{1,})\s+([A-Z][A-Za-z0-9+#.]{1,})\b", text):
-        tokens.add((pair[0] + pair[1]).lower().strip("."))
+        tokens.add(_stem(pair[0] + pair[1]))
     return tokens
 
 

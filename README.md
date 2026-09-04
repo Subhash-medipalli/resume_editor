@@ -4,6 +4,13 @@ Paste a job description. Get a **new Word resume** in the same layout as the par
 
 This is a surgical editor for contract-to-contract tailoring. A human should be able to review the result in about 1–5 minutes. It is not a rewrite tool and it will not invent jobs, dates, tools, or metrics.
 
+
+## Attach a base resume
+
+In the UI, step **0. Base resume** accepts an optional `.docx`. If you attach one, that file is the base for the run (saved under `out/uploads/`, never overwriting your original). If you leave it empty, the in-repo `resume/*.docx` is used.
+
+After a run, **Changes (diff)** shows the exact line edits so you can review before downloading.
+
 ## How the site is built
 
 There is no React app, no Node server, and no database. One small Python package does everything:

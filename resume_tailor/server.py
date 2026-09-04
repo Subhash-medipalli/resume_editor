@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 _TAILOR_LOCK = threading.Lock()
 
 # A job description is text. Anything this large is not one.
-MAX_BODY_BYTES = 1_000_000
+MAX_BODY_BYTES = 8_000_000
 
 # Only requests addressed to this machine are served. Without this check any
 # web page the user visits can drive the tool, and a DNS-rebinding page can
@@ -57,12 +57,44 @@ def _json_bytes(payload: dict, status: int = 200) -> tuple[int, bytes, str]:
     return status, body, "application/json; charset=utf-8"
 
 
-def _run_tailor(job_description: str) -> dict:
+
+def _save_attached_resume(payload: dict) -> Path | None:
+    """Optional base64 .docx from the browser. None = use the in-repo resume."""
+    import base64
+    import re
+
+    b64 = str(payload.get("resume_b64") or "").strip()
+    if not b64:
+        return None
+    name = str(payload.get("resume_name") or "attached.docx")
+    name = Path(name).name
+    if not name.lower().endswith(".docx"):
+        raise ValueError("Attached resume must be a .docx file.")
+    # strip data-url prefix if present
+    if "," in b64 and b64.lower().startswith("data:"):
+        b64 = b64.split(",", 1)[1]
+    try:
+        data = base64.b64decode(b64, validate=False)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Could not decode attached resume: {exc}") from exc
+    if len(data) < 100 or data[:2] != b"PK":
+        raise ValueError("Attached file does not look like a .docx (zip) file.")
+    if len(data) > 5_000_000:
+        raise ValueError("Attached resume is too large (max 5 MB).")
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "attached.docx"
+    dest_dir = ROOT / "out" / "uploads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / safe
+    dest.write_bytes(data)
+    return dest
+
+
+def _run_tailor(job_description: str, resume_path: Path | None = None) -> dict:
     with _TAILOR_LOCK:
-        return _run_tailor_locked(job_description)
+        return _run_tailor_locked(job_description, resume_path)
 
 
-def _run_tailor_locked(job_description: str) -> dict:
+def _run_tailor_locked(job_description: str, resume_path: Path | None = None) -> dict:
     load_dotenv(ROOT / ".env")
     import os
 
@@ -76,8 +108,11 @@ def _run_tailor_locked(job_description: str) -> dict:
     if not jd:
         return {"ok": False, "error": "Job description is empty."}
 
-    resume_path = _resolve_resume(None)
-    _ensure_original_backup(resume_path)
+    if resume_path is None:
+        resume_path = _resolve_resume(None)
+        _ensure_original_backup(resume_path)
+    elif not resume_path.is_file():
+        return {"ok": False, "error": f"Attached resume not found: {resume_path}"}
     original = _load_source_text(resume_path)
     base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_BASE_URL
     model = os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_MODEL
@@ -103,6 +138,9 @@ def _run_tailor_locked(job_description: str) -> dict:
     diff_text = unified_diff(original, tailored, fromfile=str(resume_path), tofile=str(resume_path))
     out_dir = ROOT / "out"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The untouched model reply: the only way to tell a model that echoed the
+    # resume from a pipeline that dropped its edits.
+    (out_dir / "model.raw.txt").write_text(result.raw, encoding="utf-8")
     written = None
     if report.ok:
         written = _write_outputs(
@@ -237,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, b'{"error":"bad Content-Length"}', "application/json")
             return
         if length < 0 or length > MAX_BODY_BYTES:
-            self._send(413, b'{"error":"job description too large"}', "application/json")
+            self._send(413, b'{"error":"request body too large"}', "application/json")
             return
         content_type = (self.headers.get("Content-Type") or "").split(";")[0].strip()
         if content_type != "application/json":
@@ -263,7 +301,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             if path == "/api/tailor":
-                result = _run_tailor(str(payload.get("jd") or ""))
+                try:
+                    attached = _save_attached_resume(payload)
+                except ValueError as exc:
+                    result = {"ok": False, "error": str(exc)}
+                    _, body, ctype = _json_bytes(result, 400)
+                    self._send(400, body, ctype)
+                    return
+                result = _run_tailor(str(payload.get("jd") or ""), attached)
                 status = 200 if "error" not in result or result.get("ok") else 400
                 if result.get("error") and not result.get("ok"):
                     status = 400

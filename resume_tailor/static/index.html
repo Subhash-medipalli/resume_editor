@@ -7,80 +7,50 @@
   <title>Resume tailor</title>
   <style>
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: #f4f5f7;
-      color: #111;
-      font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
+    body { margin: 0; background: #f4f5f7; color: #111; font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     .wrap { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
     h1 { margin: 0 0 6px; font-size: 22px; }
     .sub { margin: 0 0 20px; color: #555; }
-    label { display: block; font-weight: 700; margin: 0 0 8px; }
-    textarea {
-      display: block;
-      width: 100%;
-      min-height: 220px;
-      padding: 12px;
-      border: 2px solid #111;
-      border-radius: 8px;
-      background: #fff;
-      color: #111;
+    label { display: block; font-weight: 700; margin: 16px 0 8px; }
+    textarea, input[type="file"] {
+      display: block; width: 100%; padding: 12px; border: 2px solid #111; border-radius: 8px; background: #fff; color: #111;
       font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
+    textarea { min-height: 220px; }
+    .hint { margin: 6px 0 0; color: #555; font-size: 14px; }
     .actions { display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
     button {
-      -webkit-appearance: none;
-      appearance: none;
-      border: 0;
-      border-radius: 8px;
+      -webkit-appearance: none; appearance: none; border: 0; border-radius: 8px;
       font: 700 18px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      padding: 16px 22px;
-      cursor: pointer;
-      min-height: 52px;
+      padding: 16px 22px; cursor: pointer; min-height: 52px;
     }
-    button[type="submit"] {
-      background: #155dfc;
-      color: #fff;
-      flex: 1 1 240px;
-    }
+    button[type="submit"] { background: #155dfc; color: #fff; flex: 1 1 240px; }
     button[type="submit"]:disabled { background: #8aa6f8; cursor: wait; }
-    button.secondary {
-      background: #fff;
-      color: #111;
-      border: 2px solid #111;
-    }
+    button.secondary { background: #fff; color: #111; border: 2px solid #111; }
     .status { margin-top: 12px; min-height: 1.3em; }
     .status.ok { color: #0b7a3b; font-weight: 700; }
     .status.bad { color: #b00020; font-weight: 700; }
-    .score {
-      display: none;
-      margin-top: 16px;
-      padding: 14px 16px;
-      background: #fff;
-      border: 2px solid #111;
-      border-radius: 8px;
-    }
+    .score { display: none; margin-top: 16px; padding: 14px 16px; background: #fff; border: 2px solid #111; border-radius: 8px; }
     .score.show { display: block; }
     .score b { font-size: 32px; }
     a.dl { display: inline-block; margin-top: 10px; font-weight: 700; color: #155dfc; }
     h2 { margin: 28px 0 8px; font-size: 16px; }
     pre {
-      margin: 0;
-      padding: 12px;
-      background: #fff;
-      border: 1px solid #ccc;
-      border-radius: 8px;
-      white-space: pre-wrap;
-      font: 13px/1.5 ui-monospace, Menlo, monospace;
+      margin: 0; padding: 12px; background: #fff; border: 1px solid #ccc; border-radius: 8px;
+      white-space: pre-wrap; font: 13px/1.5 ui-monospace, Menlo, monospace; max-height: 360px; overflow: auto;
     }
+    .add { color: #0b7a3b; }
+    .del { color: #b00020; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Resume tailor</h1>
-    <p class="sub">Paste the job description, then click the blue button. You get a new Word file and a match score. The original resume is not overwritten.</p>
+    <p class="sub">Paste a JD, optionally attach a base Word resume, then click Tailor. You get a new Word file, a match score, and a diff. The base file is never overwritten.</p>
     <form id="form">
+      <label for="resume">0. Base resume (optional .docx)</label>
+      <input type="file" id="resume" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+      <p class="hint" id="resumeHint">No file attached — uses the resume already in this project.</p>
       <label for="jd">1. Paste job description</label>
       <textarea id="jd" name="jd" required placeholder="Paste the full job description here"></textarea>
       <div class="actions">
@@ -95,10 +65,63 @@
       <a class="dl" id="dl" href="/api/download" hidden>Download Word resume</a>
     </div>
     <h2>Changelog</h2>
-    <pre id="log">Nothing yet. Paste a JD and click Tailor resume.</pre>
+    <pre id="log">Nothing yet.</pre>
+    <h2>Changes (diff)</h2>
+    <pre id="diff">Nothing yet. After a run, exact line edits show here.</pre>
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
+    let attached = null; // { name, b64 }
+
+    function bytesToB64(buf) {
+      const bytes = new Uint8Array(buf);
+      let s = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < bytes.length; i += chunk) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+      }
+      return btoa(s);
+    }
+
+    $("resume").addEventListener("change", async (event) => {
+      const file = event.target.files && event.target.files[0];
+      attached = null;
+      if (!file) {
+        $("resumeHint").textContent = "No file attached — uses the resume already in this project.";
+        return;
+      }
+      if (!file.name.toLowerCase().endsWith(".docx")) {
+        $("resumeHint").textContent = "Please choose a .docx file.";
+        event.target.value = "";
+        return;
+      }
+      const b64 = bytesToB64(await file.arrayBuffer());
+      attached = { name: file.name, b64 };
+      $("resumeHint").textContent = "Using attached base: " + file.name;
+    });
+
+    function paintDiff(text) {
+      const el = $("diff");
+      el.textContent = "";
+      if (!text || text === "(no changes)") {
+        el.textContent = text || "(no changes)";
+        return;
+      }
+      // Only the lines that changed: "- was" in red, "+ now" in green.
+      // Context lines and diff headers are noise for a human reviewer.
+      let shown = 0;
+      for (const line of text.split("\n")) {
+        if (line.startsWith("@@")) { if (shown) el.appendChild(document.createTextNode("\n")); continue; }
+        if (line.startsWith("+++") || line.startsWith("---")) continue;
+        if (!line.startsWith("+") && !line.startsWith("-")) continue;
+        const span = document.createElement("span");
+        span.className = line[0] === "+" ? "add" : "del";
+        span.textContent = (line[0] === "+" ? "NOW  " : "WAS  ") + line.slice(1).trim() + "\n";
+        el.appendChild(span); shown++;
+      }
+      if (!shown) el.textContent = "(no changes)";
+    }
+
     async function post(url, body) {
       const res = await fetch(url, {
         method: "POST",
@@ -109,21 +132,27 @@
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
     }
+
     $("form").addEventListener("submit", async (event) => {
       event.preventDefault();
       const jd = $("jd").value.trim();
       if (!jd) { $("status").textContent = "Paste a job description first."; $("status").className = "status bad"; return; }
       $("go").disabled = true;
-      $("status").textContent = "Tailoring… this can take a minute.";
+      $("status").textContent = "Tailoring… this can take a couple of minutes.";
       $("status").className = "status";
-      // Clear the previous run before starting a new one, so a failure can
-      // never leave the last job's score and download link on screen.
       $("scorebox").classList.remove("show");
       $("dl").hidden = true;
       $("log").textContent = "Working…";
+      $("diff").textContent = "Working…";
       try {
-        const data = await post("/api/tailor", { jd });
+        const payload = { jd };
+        if (attached) {
+          payload.resume_b64 = attached.b64;
+          payload.resume_name = attached.name;
+        }
+        const data = await post("/api/tailor", payload);
         $("log").textContent = data.changelog || "(no changelog)";
+        paintDiff(data.diff || "(no changes)");
         if (data.match_score != null) {
           $("score").textContent = data.match_score;
           $("matchline").textContent = data.match_line || "";
@@ -145,17 +174,20 @@
         $("status").className = data.ok ? "status ok" : "status bad";
       } catch (err) {
         $("log").textContent = "Nothing was produced for this run.";
+        $("diff").textContent = "Nothing yet.";
         $("status").textContent = err.message;
         $("status").className = "status bad";
       } finally {
         $("go").disabled = false;
       }
     });
+
     $("reset").onclick = async () => {
       $("reset").disabled = true;
       try {
         const data = await post("/api/reset");
         $("log").textContent = data.message || "Reset.";
+        $("diff").textContent = "Nothing yet.";
         $("status").textContent = "Original resume restored.";
         $("status").className = "status ok";
       } catch (err) {

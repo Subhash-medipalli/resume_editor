@@ -282,3 +282,25 @@ def test_unchanged_resume_raises_no_technology_violations():
     _, report = apply_guardrails(SAMPLE_RESUME, SAMPLE_RESUME)
     assert report.ok
     assert not report.violations
+
+
+def test_changelog_claiming_many_edits_for_one_changed_line_is_flagged():
+    """A model listed four edits and had deleted one unrelated skill."""
+    from resume_tailor.guardrails import check_changelog_matches_diff
+
+    assert check_changelog_matches_diff(["Reworded summary", "Reordered skills", "Tweaked bullet"], 1)
+    assert not check_changelog_matches_diff(["Tweaked one bullet"], 1)
+
+
+def test_dropping_a_true_skill_is_warned():
+    tailored = SAMPLE_RESUME.replace("- Languages: Python, SQL, Bash", "- Languages: Python, SQL")
+    _, report = apply_guardrails(SAMPLE_RESUME, tailored)
+    assert any("Bash" in w for w in report.warnings)
+
+
+def test_prose_vouches_for_capitalised_skill_terms():
+    """"human-in-the-loop" in a bullet is evidence for "Human-in-the-Loop" on a skills line."""
+    base = "# A\na@b.com\n\n## Summary\n\n- Built human-in-the-loop review with structured outputs and prompt evaluation.\n\n## Skills\n\n- Tools: Python\n"
+    tailored = base.replace("- Tools: Python", "- Tools: Python, Human-in-the-Loop Review, Structured Outputs, Evals")
+    _, report = apply_guardrails(base, tailored)
+    assert report.ok, report.violations

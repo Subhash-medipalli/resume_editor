@@ -109,6 +109,9 @@ def main(argv: list[str] | None = None) -> int:
         tofile=str(resume_path),
     )
     out_dir.mkdir(parents=True, exist_ok=True)
+    # The untouched model reply: the only way to tell a model that echoed the
+    # resume from a pipeline that dropped its edits.
+    (out_dir / "model.raw.txt").write_text(result.raw, encoding="utf-8")
     written_path = None
     if report.ok:
         written_path = _write_outputs(

@@ -7,7 +7,6 @@ mksravya6@gmail.com | +1 253-200-7287 | LinkedIn
 
 Senior AI/ML Engineer with 11+ years of experience delivering production-grade machine learning, Generative AI, Agentic AI, Java, and Spring solutions across banking and healthcare.
 
-- Proficient with Vertex AI components (Model Garden, Vertex AI Pipelines, endpoints) and agentic AI architectures for building scalable cloud-native AI applications.
 - Designed and deployed end-to-end ML pipelines covering data ingestion, feature engineering, model development, training, evaluation, deployment, monitoring, and production inference using controlled workflows.
 - Built LLM-powered applications using GPT-5, Claude Sonnet, AWS Bedrock, Azure AI Foundry, LangChain, LangGraph, and Retrieval-Augmented Generation architectures.
 - Built agentic AI workflows using LangGraph, CrewAI, and AutoGen, integrating Jira API, DynamoDB, structured outputs, validation, escalation, and human-in-the-loop controls.
