@@ -173,28 +173,15 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     for line in base_facts.cert_lines:
         if line.translate(_TYPOGRAPHY).lower() not in out_norm:
             report.violations.append(f"Certification line missing: {line}")
-    for metric in out_facts.metrics:
-        if metric not in base_facts.metrics:
-            report.violations.append(
-                f"Invented metric {metric!r} is not on the base resume."
-            )
-
-    # Rule 4 of the system prompt forbids inventing tools the candidate never
-    # listed, but nothing in code enforced it — a run added "GitOps" to a skills
-    # line and passed clean.
+    # Content-level inventions (a number, a tool, a skill term the base resume
+    # never had) are fixed line by line: the offending line goes back to the
+    # original and everything else the model did survives. Blocking the whole
+    # run for one bad clause meant the user got nothing, run after run.
     base_tech = _known_vocabulary(base_n)
-    invented = {}
+    offenders: set[str] = {m for m in out_facts.metrics if m not in base_facts.metrics}
     for token in _technology_tokens(out):
         if _stem(token) not in base_tech:
-            invented.setdefault(_stem(token), token)
-    for token in sorted(invented.values()):
-        report.violations.append(
-            f"Invented technology {token!r} is not on the base resume."
-        )
-    # A skills line is a list of claims. Adding a term that appears nowhere on
-    # the base resume is a new claim about what the candidate can do, which is
-    # the fabrication this tool exists to prevent — even when the word looks
-    # ordinary ("Runbooks", "Alerting").
+            offenders.add(token.lower())
     already = {_stem(token) for token in _technology_tokens(out)}
 
     def evidenced(token: str) -> bool:
@@ -205,21 +192,30 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
         # "Alerting" by "alerts". Swap for a synonym list if it lets a fake through.
         return len(stem) >= 4 and any(known.startswith(stem) for known in base_tech)
 
-    new_skills = sorted({
-        _stem(token): token for token in _skill_line_tokens(out) if not evidenced(token)
-    }.values())
+    for token in _skill_line_tokens(out):
+        if not evidenced(token):
+            offenders.add(token.lower())
+
+    if offenders:
+        out, reverted = _revert_lines_containing(base_n, out, offenders)
+        for why, line in reverted:
+            report.warnings.append(
+                f"Put back the original line because the model added {why!r}, "
+                f"which is not on the base resume: \u201c{line[:70]}\u2026\u201d"
+            )
+        # Anything that survived the revert is a fabrication we could not isolate.
+        for offender in sorted(offenders):
+            if _line_has_offender(out, {offender}):
+                report.violations.append(
+                    f"Invented {offender!r} is not on the base resume and could not be removed."
+                )
+
     lost = sorted({_stem(t): t for t in _skill_line_tokens(base_n)}.items())
     kept = {_stem(t) for t in _skill_line_tokens(out)} | {_stem(t) for t in _technology_tokens(out)}
     lost = [t for stem, t in lost if stem not in kept and stem in {_stem(x) for x in _skill_line_tokens(base_n)}]
     if lost:
         report.warnings.append(
             "Skills dropped from a skills line — make sure that was intended: " + ", ".join(lost[:12])
-        )
-    if new_skills:
-        report.violations.append(
-            "Skill terms added that are not on the base resume: "
-            + ", ".join(new_skills[:12])
-            + ". Remove them or point at the experience that evidences them."
         )
 
     changed = _changed_content_lines(base_n, out)
@@ -541,6 +537,54 @@ def _known_vocabulary(text: str) -> set[str]:
     for pair in re.findall(r"\b([A-Z][A-Za-z0-9+#.]{1,})\s+([A-Z][A-Za-z0-9+#.]{1,})\b", text):
         tokens.add(_stem(pair[0] + pair[1]))
     return tokens
+
+
+def _line_has_offender(text: str, offenders: set[str]) -> bool:
+    low = text.lower()
+    if any(o in low for o in offenders):
+        return True
+    return any(_canon_metric(m) in offenders for m in METRIC_RE.findall(text))
+
+
+def _revert_lines_containing(
+    base: str, out: str, offenders: set[str]
+) -> tuple[str, list[tuple[str, str]]]:
+    """Replace each tailored line carrying an offender with its original line.
+
+    Lines are aligned in order; an offending line that replaced an original
+    gets the original back, an offending line the model inserted is dropped.
+    Returns the repaired text and (offender, line) pairs for the report.
+    """
+    base_lines, out_lines = base.splitlines(), out.splitlines()
+    matcher = difflib.SequenceMatcher(
+        a=[l.strip() for l in base_lines], b=[l.strip() for l in out_lines]
+    )
+    repaired: list[str] = []
+    reverted: list[tuple[str, str]] = []
+
+    def offender_in(line: str) -> str | None:
+        low = line.lower()
+        for o in sorted(offenders, key=len, reverse=True):
+            if o in low or any(_canon_metric(m) == o for m in METRIC_RE.findall(line)):
+                return o
+        return None
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            repaired.extend(out_lines[j1:j2])
+        elif tag == "delete":
+            continue  # the model removed these; a separate check counts removals
+        else:  # insert or replace
+            for k in range(j2 - j1):
+                line = out_lines[j1 + k]
+                hit = offender_in(line)
+                if hit is None:
+                    repaired.append(line)
+                    continue
+                reverted.append((hit, line.strip()))
+                if tag == "replace" and i1 + k < i2:
+                    repaired.append(base_lines[i1 + k])
+    return "\n".join(repaired) + ("\n" if out.endswith("\n") else ""), reverted
 
 
 def _fuzzy_present(value: str, originals: tuple[str, ...]) -> bool:

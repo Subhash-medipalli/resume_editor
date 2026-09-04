@@ -76,10 +76,10 @@ def test_invented_metric_is_rejected():
         "Reduced duplicate processing in a batch pipeline by adding idempotency keys and CloudWatch alarms.",
         "Reduced duplicate processing by 87% and saved $2M in a batch pipeline.",
     )
-    _, report = apply_guardrails(SAMPLE_RESUME, hacked)
-    assert not report.ok
-    joined = " ".join(report.violations)
-    assert "metric" in joined.lower()
+    fixed, report = apply_guardrails(SAMPLE_RESUME, hacked)
+    assert report.ok, report.violations
+    assert "87%" not in fixed and "$2M" not in fixed
+    assert any("87%" in w or "$2m" in w.lower() for w in report.warnings)
 
 
 def test_rewrite_is_rejected():
@@ -197,9 +197,9 @@ def test_inflated_job_title_is_rejected():
 def test_inflated_years_of_experience_is_rejected():
     """METRIC_RE matched only currency and percentages, so "9+ years" was free."""
     hacked = FLAT_RESUME.replace("9+ years", "15+ years")
-    _, report = apply_guardrails(FLAT_RESUME, hacked)
-    assert not report.ok
-    assert any("metric" in v.lower() for v in report.violations)
+    fixed, report = apply_guardrails(FLAT_RESUME, hacked)
+    assert report.ok, report.violations
+    assert "15+ years" not in fixed and "9+ years" in fixed
 
 
 def test_cosmetic_date_reformatting_is_not_a_violation():
@@ -250,10 +250,10 @@ def test_invented_technology_is_rejected():
     hacked = SAMPLE_RESUME.replace(
         "- Languages: Python, SQL, Bash", "- Languages: Python, SQL, Bash, GitOps, PySpark"
     )
-    _, report = apply_guardrails(SAMPLE_RESUME, hacked)
-    assert not report.ok
-    joined = " ".join(report.violations)
-    assert "GitOps" in joined or "PySpark" in joined
+    fixed, report = apply_guardrails(SAMPLE_RESUME, hacked)
+    assert report.ok, report.violations
+    assert "GitOps" not in fixed and "PySpark" not in fixed
+    assert "- Languages: Python, SQL, Bash" in fixed
 
 
 def test_a_tool_added_to_a_skills_line_is_rejected_even_if_it_looks_ordinary():
@@ -261,9 +261,9 @@ def test_a_tool_added_to_a_skills_line_is_rejected_even_if_it_looks_ordinary():
     hacked = SAMPLE_RESUME.replace(
         "- Languages: Python, SQL, Bash", "- Languages: Python, SQL, Bash, Terraform"
     )
-    _, report = apply_guardrails(SAMPLE_RESUME, hacked)
-    assert not report.ok
-    assert any("Terraform" in v for v in report.violations)
+    fixed, report = apply_guardrails(SAMPLE_RESUME, hacked)
+    assert report.ok
+    assert "Terraform" not in fixed and any("Terraform" in w for w in report.warnings)
 
 
 def test_resurfacing_an_existing_tool_on_a_skills_line_is_allowed():
