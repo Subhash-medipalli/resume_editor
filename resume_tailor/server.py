@@ -235,7 +235,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, html, "text/html; charset=utf-8")
             return
         if path == "/api/health":
-            status, body, ctype = _json_bytes({"ok": True})
+            from resume_tailor.docx_io import find_parent_docx
+
+            base = find_parent_docx(ROOT)
+            status, body, ctype = _json_bytes({"ok": True, "base": base.name if base else None})
             self._send(status, body, ctype)
             return
         if path == "/api/download":
