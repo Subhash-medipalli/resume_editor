@@ -510,7 +510,7 @@ def _skill_line_tokens(text: str) -> set[str]:
         marker = line.find(": ")
         if not 0 < marker < 60:
             continue
-        for token in re.findall(r"\b[A-Z][A-Za-z0-9+#.]{1,}\b", line[marker + 2 :]):
+        for token in re.findall(r"\b[A-Z][A-Za-z0-9+#.-]*[A-Za-z0-9+#]\b", line[marker + 2 :]):
             if token.upper() not in TECH_STOPWORDS:
                 found.add(token.strip("."))
     return found
@@ -534,6 +534,7 @@ def _known_vocabulary(text: str) -> set[str]:
     # Every word in any case: "human-in-the-loop" in a bullet is evidence for
     # "Human-in-the-Loop" on a skills line. Only capitalised words were learned
     # before, so ordinary prose could not vouch for its own vocabulary.
+    tokens |= {_stem(word) for word in re.findall(r"[A-Za-z][A-Za-z0-9+#.-]*[A-Za-z0-9+#]", text)}
     tokens |= {_stem(word) for word in re.findall(r"[A-Za-z][A-Za-z0-9+#.]{1,}", text)}
     # Products get written both ways ("Llama Index" / "LlamaIndex"), and a
     # respacing is not a new claim.

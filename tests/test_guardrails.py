@@ -304,3 +304,10 @@ def test_prose_vouches_for_capitalised_skill_terms():
     tailored = base.replace("- Tools: Python", "- Tools: Python, Human-in-the-Loop Review, Structured Outputs, Evals")
     _, report = apply_guardrails(base, tailored)
     assert report.ok, report.violations
+
+
+def test_hyphenated_skill_terms_are_judged_whole():
+    """"Multi-agent" was split at the hyphen and "Multi" reported as invented."""
+    base = "# A\na@b.com\n\n## Summary\n\n- Built multi-agent workflows.\n\n## Skills\n\n- AI: LangGraph\n"
+    _, report = apply_guardrails(base, base.replace("- AI: LangGraph", "- AI: LangGraph, Multi-agent Systems"))
+    assert report.ok, report.violations

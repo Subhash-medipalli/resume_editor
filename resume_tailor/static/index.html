@@ -40,6 +40,7 @@
     .verdict { display:grid; grid-template-columns:auto 1fr; gap:20px; align-items:center; }
     .ring { width:96px; height:96px; border-radius:50%; display:grid; place-items:center; font-size:34px; font-weight:800; color:#fff; }
     .ring.good { background:var(--green); } .ring.mid { background:var(--amber); } .ring.poor { background:var(--red); }
+    .ring.blocked { background:var(--muted); }
     .fit { font-size:20px; font-weight:700; margin:0 0 4px; }
     .why { color:var(--muted); font-size:15px; margin:0; }
     .cta { display:flex; gap:12px; flex-wrap:wrap; margin-top:20px; }
@@ -103,12 +104,13 @@
       </div>
       <div class="cta">
         <a class="btn primary big" id="dl" href="/api/download" hidden>Download Word resume</a>
+        <button class="btn primary big" id="retry" type="button" hidden>Run again</button>
         <button class="btn ghost" id="again" type="button">Tailor for another job</button>
       </div>
     </div>
     <div class="card banner red" id="blocked" hidden>
       <h3>Not written — the model tried to add things that aren't on the resume</h3>
-      <p>Nothing was saved. Either run it again, or if this experience is real, add it to the base resume so future runs can use it.</p>
+      <p>Nothing was saved, so there is nothing to download. The model is not deterministic — <b>Run again</b> usually gives a clean result. If the flagged experience is real, add it to the base resume so future runs can use it.</p>
       <ul id="violations"></ul>
     </div>
     <div class="card banner amber" id="warn" hidden>
@@ -143,6 +145,7 @@
   $("jd").addEventListener("input", () => { try { localStorage.setItem("jd", $("jd").value); } catch {} });
   $("jd").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run(); });
   $("go").onclick = run;
+  $("retry").onclick = run;
   $("again").onclick = () => { $("jd").value = ""; try { localStorage.removeItem("jd"); } catch {} show("enter"); $("jd").focus(); };
 
   function list(id, items) { const ul = $(id); ul.textContent = ""; for (const t of items || []) { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); } return (items || []).length; }
@@ -176,11 +179,12 @@
       clearInterval(tick); show("enter"); $("err").textContent = e.message; $("err").hidden = false; return;
     }
     clearInterval(tick);
-    const sc = data.match_score; const cls = sc >= 75 ? "good" : sc >= 50 ? "mid" : "poor";
+    const sc = data.match_score; const cls = !data.ok ? "blocked" : sc >= 75 ? "good" : sc >= 50 ? "mid" : "poor";
     $("ring").className = "ring " + cls; $("ring").textContent = sc ?? "–";
     $("fit").textContent = data.ok ? (sc >= 75 ? "Good fit" : sc >= 50 ? "Partial fit" : "Poor fit") + ` · ${data.changed_lines || 0} line${data.changed_lines === 1 ? "" : "s"} changed` : "Not written";
     $("why").textContent = (data.score_inferred ? "(score inferred from wording) " : "") + (data.match_line || "");
     $("dl").hidden = !data.download; if (data.download) $("dl").href = data.download + "?t=" + Date.now();
+    $("retry").hidden = !!data.ok;
     $("blocked").hidden = !list("violations", data.violations);
     $("warn").hidden = !list("warnings", data.warnings);
     if (!list("changes", data.changes)) $("changes").innerHTML = '<li class="empty">Nothing listed.</li>';
