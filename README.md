@@ -46,6 +46,41 @@ silently-unchanged download is the one failure this tool is built to make loud.
 
 The match score is the model’s honest 0–100 against the JD must-haves (years, required tools, domain). A low score usually means the JD does not match the resume, not that the site is broken.
 
+## Which model, and why it is slow
+
+Six models on this NVIDIA key were run on the same two job descriptions (one a
+good fit, one a poor fit) on 4 Sep 2026. Only one produced an honest, edited,
+guardrail-passing resume:
+
+| Model | Time | Good-fit JD | Poor-fit JD |
+|---|---|---|---|
+| **nemotron-3-ultra, thinking on** (default) | 2–5 min | 85, passed, real edits | 35, blocked GitOps/IRSA |
+| nemotron-3-ultra, thinking off | 107–224 s | 78, passed | 55, **13 fabricated tools + a metric** |
+| nemotron-3-super-120b, thinking on | 96 s | 50, passed, no real tailoring | — |
+| nemotron-3-super-120b, thinking off | 27–77 s | returned the resume **unchanged** while listing 3 edits | 30 |
+| nemotron-3.5-lightning-30b | 95 s | — | 68, listed 4 edits, changed 1 unrelated line |
+| nemotron-3-nano-omni-30b | 46 s | — | 65, fabricated 9 tools |
+| gpt-oss-20b | 135 s | — | 60, rewrote 52 lines |
+
+The wait is the price of the honesty. Thinking is what stops the model
+importing keywords from the job description; turning it off is not reliably
+faster and roughly doubles fabrication. Every fabrication above was caught by
+the guardrails, so a faster model does not save time — it produces a rejected
+run you then re-do.
+
+## Why the score is not 80–90 on every job
+
+The score is the model's honest read of how well the **base resume** fits the
+job. It is not something the tool can raise. The only way to score 90 on every
+posting is to let the model claim experience she does not have — which is
+exactly what the guardrails exist to stop, and what they stop several times a
+day in practice.
+
+The lever that works is the base resume itself. It is the ceiling. If she has
+set SLOs, done GitOps, handled HIPAA data, add it to `resume/Sravya_M_resume.docx`
+once; every future run can then surface it. Ten minutes making the base
+complete does more for scores than any model or prompt change, and it is true.
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) — installs Python 3.11+ if needed
