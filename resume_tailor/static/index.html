@@ -7,195 +7,158 @@
   <title>Resume tailor</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin: 0; background: #f4f5f7; color: #111; font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .wrap { max-width: 760px; margin: 0 auto; padding: 24px 16px 48px; }
+    body { margin: 0; background: #f4f5f7; color: #111; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .wrap { max-width: 820px; margin: 0 auto; padding: 24px 16px 64px; }
     h1 { margin: 0 0 6px; font-size: 22px; }
-    .sub { margin: 0 0 20px; color: #555; }
+    h2 { margin: 28px 0 10px; font-size: 17px; }
+    .sub, .hint { color: #555; }
+    .sub { margin: 0 0 20px; }
+    .hint { margin: 6px 0 0; font-size: 14px; }
     label { display: block; font-weight: 700; margin: 16px 0 8px; }
-    textarea, input[type="file"] {
-      display: block; width: 100%; padding: 12px; border: 2px solid #111; border-radius: 8px; background: #fff; color: #111;
-      font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    textarea { min-height: 220px; }
-    .hint { margin: 6px 0 0; color: #555; font-size: 14px; }
+    textarea, input[type="file"] { display: block; width: 100%; padding: 12px; border: 2px solid #111; border-radius: 8px; background: #fff; color: #111; font: 15px/1.45 inherit; }
+    textarea { min-height: 200px; }
     .actions { display: flex; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
-    button {
-      -webkit-appearance: none; appearance: none; border: 0; border-radius: 8px;
-      font: 700 18px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      padding: 16px 22px; cursor: pointer; min-height: 52px;
-    }
-    button[type="submit"] { background: #155dfc; color: #fff; flex: 1 1 240px; }
+    button, a.btn { appearance: none; border: 0; border-radius: 8px; font: 700 17px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; padding: 16px 22px; cursor: pointer; min-height: 52px; text-decoration: none; display: inline-flex; align-items: center; }
+    button[type="submit"], a.btn { background: #155dfc; color: #fff; }
+    button[type="submit"] { flex: 1 1 240px; justify-content: center; }
     button[type="submit"]:disabled { background: #8aa6f8; cursor: wait; }
     button.secondary { background: #fff; color: #111; border: 2px solid #111; }
-    .status { margin-top: 12px; min-height: 1.3em; }
-    .status.ok { color: #0b7a3b; font-weight: 700; }
-    .status.bad { color: #b00020; font-weight: 700; }
-    .score { display: none; margin-top: 16px; padding: 14px 16px; background: #fff; border: 2px solid #111; border-radius: 8px; }
-    .score.show { display: block; }
-    .score b { font-size: 32px; }
-    a.dl { display: inline-block; margin-top: 10px; font-weight: 700; color: #155dfc; }
-    h2 { margin: 28px 0 8px; font-size: 16px; }
-    pre {
-      margin: 0; padding: 12px; background: #fff; border: 1px solid #ccc; border-radius: 8px;
-      white-space: pre-wrap; font: 13px/1.5 ui-monospace, Menlo, monospace; max-height: 360px; overflow: auto;
-    }
-    .add { color: #0b7a3b; }
-    .del { color: #b00020; }
+    .status { margin-top: 12px; min-height: 1.3em; font-weight: 700; }
+    .status.ok { color: #0b7a3b; } .status.bad { color: #b00020; }
+    .card { background: #fff; border: 2px solid #111; border-radius: 10px; padding: 18px 20px; margin-top: 16px; }
+    .score { display: flex; align-items: baseline; gap: 10px; }
+    .score b { font-size: 40px; line-height: 1; }
+    .stats { color: #555; margin: 8px 0 12px; font-size: 14px; }
+    ul { margin: 0; padding-left: 22px; } li { margin: 6px 0; }
+    .blocked { border-color: #b00020; background: #fff5f5; }
+    .blocked h2, .warn h2 { margin-top: 0; }
+    .warn { border-color: #b7791f; background: #fffaf0; }
+    .change { margin: 14px 0; }
+    .was, .now { padding: 8px 12px; border-left: 5px solid; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .was { background: #fde8e8; border-color: #b00020; }
+    .now { background: #e6f4ea; border-color: #0b7a3b; }
+    .was::before, .now::before { display: block; font-size: 11px; font-weight: 700; letter-spacing: .05em; margin-bottom: 2px; }
+    .was::before { content: "BEFORE"; color: #b00020; } .now::before { content: "AFTER"; color: #0b7a3b; }
+    .empty { color: #555; font-style: italic; }
+    [hidden] { display: none !important; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Resume tailor</h1>
-    <p class="sub">Paste a JD, optionally attach a base Word resume, then click Tailor. You get a new Word file, a match score, and a diff. The base file is never overwritten.</p>
+    <p class="sub">Paste a job description, optionally attach a base Word resume, then click Tailor. You get a new Word file, a match score, and every line that changed. The base file is never overwritten.</p>
     <form id="form">
       <label for="resume">0. Base resume (optional .docx)</label>
-      <input type="file" id="resume" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+      <input type="file" id="resume" accept=".docx" />
       <p class="hint" id="resumeHint">No file attached — uses the resume already in this project.</p>
       <label for="jd">1. Paste job description</label>
-      <textarea id="jd" name="jd" required placeholder="Paste the full job description here"></textarea>
+      <textarea id="jd" required placeholder="Paste the full job description here"></textarea>
       <div class="actions">
         <button type="submit" id="go">2. Tailor resume</button>
         <button type="button" class="secondary" id="reset">Reset</button>
       </div>
     </form>
     <div class="status" id="status"></div>
-    <div class="score" id="scorebox">
-      <div><b id="score">—</b> / 100 match</div>
-      <div id="matchline" style="margin-top:6px;color:#444"></div>
-      <a class="dl" id="dl" href="/api/download" hidden>Download Word resume</a>
+
+    <div id="result" hidden>
+      <div class="card">
+        <div class="score"><b id="score">—</b><span>/ 100 match</span></div>
+        <div id="matchline"></div>
+        <div class="stats" id="stats"></div>
+        <a class="btn" id="dl" href="/api/download" hidden>Download Word resume</a>
+      </div>
+      <div class="card blocked" id="blocked" hidden>
+        <h2>Not written — fix these first</h2>
+        <ul id="violations"></ul>
+      </div>
+      <div class="card warn" id="warn" hidden>
+        <h2>Worth a look</h2>
+        <ul id="warnings"></ul>
+      </div>
+      <h2>What the model says it changed</h2>
+      <ul id="changes"></ul>
+      <h2>Every line that actually changed</h2>
+      <div id="diff"></div>
     </div>
-    <h2>Changelog</h2>
-    <pre id="log">Nothing yet.</pre>
-    <h2>Changes (diff)</h2>
-    <pre id="diff">Nothing yet. After a run, exact line edits show here.</pre>
   </div>
   <script>
     const $ = (id) => document.getElementById(id);
-    let attached = null; // { name, b64 }
+    let attached = null;
 
-    function bytesToB64(buf) {
-      const bytes = new Uint8Array(buf);
-      let s = "";
-      const chunk = 0x8000;
-      for (let i = 0; i < bytes.length; i += chunk) {
-        s += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-      }
-      return btoa(s);
-    }
-
-    $("resume").addEventListener("change", async (event) => {
-      const file = event.target.files && event.target.files[0];
+    $("resume").addEventListener("change", async (e) => {
+      const file = e.target.files && e.target.files[0];
       attached = null;
-      if (!file) {
-        $("resumeHint").textContent = "No file attached — uses the resume already in this project.";
-        return;
-      }
-      if (!file.name.toLowerCase().endsWith(".docx")) {
-        $("resumeHint").textContent = "Please choose a .docx file.";
-        event.target.value = "";
-        return;
-      }
-      const b64 = bytesToB64(await file.arrayBuffer());
-      attached = { name: file.name, b64 };
+      if (!file) { $("resumeHint").textContent = "No file attached — uses the resume already in this project."; return; }
+      if (!file.name.toLowerCase().endsWith(".docx")) { $("resumeHint").textContent = "Please choose a .docx file."; e.target.value = ""; return; }
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let s = ""; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      attached = { name: file.name, b64: btoa(s) };
       $("resumeHint").textContent = "Using attached base: " + file.name;
     });
 
+    function list(id, items) {
+      const ul = $(id); ul.textContent = "";
+      for (const t of items || []) { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); }
+      return (items || []).length;
+    }
+
+    // One BEFORE/AFTER block per changed line. Context lines and diff headers are noise.
     function paintDiff(text) {
-      const el = $("diff");
-      el.textContent = "";
-      if (!text || text === "(no changes)") {
-        el.textContent = text || "(no changes)";
-        return;
-      }
-      // Only the lines that changed: "- was" in red, "+ now" in green.
-      // Context lines and diff headers are noise for a human reviewer.
-      let shown = 0;
-      for (const line of text.split("\n")) {
-        if (line.startsWith("@@")) { if (shown) el.appendChild(document.createTextNode("\n")); continue; }
+      const el = $("diff"); el.textContent = "";
+      const clean = (l) => l.slice(1).trim().replace(/^[-*]\s+/, "").replace(/^\*\*(.+)\*\*$/, "$1").replace(/^#+\s*/, "");
+      let block = null, shown = 0;
+      for (const line of (text || "").split("\n")) {
         if (line.startsWith("+++") || line.startsWith("---")) continue;
-        if (!line.startsWith("+") && !line.startsWith("-")) continue;
-        const span = document.createElement("span");
-        span.className = line[0] === "+" ? "add" : "del";
-        span.textContent = (line[0] === "+" ? "NOW  " : "WAS  ") + line.slice(1).trim() + "\n";
-        el.appendChild(span); shown++;
+        if (line.startsWith("@@") || !(line.startsWith("+") || line.startsWith("-"))) { block = null; continue; }
+        if (!block) { block = document.createElement("div"); block.className = "change"; el.appendChild(block); }
+        const d = document.createElement("div");
+        d.className = line[0] === "+" ? "now" : "was";
+        d.textContent = clean(line);
+        block.appendChild(d); shown++;
       }
-      if (!shown) el.textContent = "(no changes)";
+      if (!shown) { el.innerHTML = '<p class="empty">Nothing changed — the file is identical to your original.</p>'; }
     }
 
     async function post(url, body) {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: body ? JSON.stringify(body) : "{}",
-      });
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || res.statusText);
+      if (!res.ok && !data.changelog) throw new Error(data.error || res.statusText);
       return data;
     }
 
-    $("form").addEventListener("submit", async (event) => {
-      event.preventDefault();
+    $("form").addEventListener("submit", async (e) => {
+      e.preventDefault();
       const jd = $("jd").value.trim();
       if (!jd) { $("status").textContent = "Paste a job description first."; $("status").className = "status bad"; return; }
       $("go").disabled = true;
-      $("status").textContent = "Tailoring… this can take a couple of minutes.";
+      $("status").textContent = "Tailoring… this takes 2–5 minutes. The model reasons before it edits; that is what keeps it honest.";
       $("status").className = "status";
-      $("scorebox").classList.remove("show");
-      $("dl").hidden = true;
-      $("log").textContent = "Working…";
-      $("diff").textContent = "Working…";
+      $("result").hidden = true;
       try {
         const payload = { jd };
-        if (attached) {
-          payload.resume_b64 = attached.b64;
-          payload.resume_name = attached.name;
-        }
+        if (attached) { payload.resume_b64 = attached.b64; payload.resume_name = attached.name; }
         const data = await post("/api/tailor", payload);
-        $("log").textContent = data.changelog || "(no changelog)";
-        paintDiff(data.diff || "(no changes)");
-        if (data.match_score != null) {
-          $("score").textContent = data.match_score;
-          $("matchline").textContent = data.match_line || "";
-          $("scorebox").classList.add("show");
-        }
-        const dl = $("dl");
-        if (data.download) { dl.hidden = false; dl.href = data.download + "?t=" + Date.now(); }
-        else { dl.hidden = true; }
-        if (data.score_inferred) {
-          $("matchline").textContent =
-            "(score inferred from wording — the model gave no number) " +
-            ($("matchline").textContent || "");
-        }
-        $("status").textContent = data.ok
-          ? (data.changed_lines
-              ? `Done — ${data.changed_lines} line(s) changed. Download the Word file below.`
-              : "Done, but nothing changed: the file is identical to your original.")
-          : "Guardrails blocked the write. Parent resume unchanged.";
+        $("score").textContent = data.match_score ?? "—";
+        $("matchline").textContent = (data.score_inferred ? "(score inferred from wording) " : "") + (data.match_line || "");
+        $("stats").textContent = data.changed_lines ? `${data.changed_lines} line(s) changed` : "No lines changed";
+        $("dl").hidden = !data.download; if (data.download) $("dl").href = data.download + "?t=" + Date.now();
+        $("blocked").hidden = !list("violations", data.violations);
+        $("warn").hidden = !list("warnings", data.warnings);
+        if (!list("changes", data.changes)) $("changes").innerHTML = '<li class="empty">Nothing listed.</li>';
+        paintDiff(data.diff);
+        $("result").hidden = false;
+        $("status").textContent = data.ok ? "Done. Review the changes below, then download." : "Guardrails blocked the write — see why below. Your original is untouched.";
         $("status").className = data.ok ? "status ok" : "status bad";
       } catch (err) {
-        $("log").textContent = "Nothing was produced for this run.";
-        $("diff").textContent = "Nothing yet.";
-        $("status").textContent = err.message;
-        $("status").className = "status bad";
-      } finally {
-        $("go").disabled = false;
-      }
+        $("status").textContent = err.message; $("status").className = "status bad";
+      } finally { $("go").disabled = false; }
     });
 
     $("reset").onclick = async () => {
       $("reset").disabled = true;
-      try {
-        const data = await post("/api/reset");
-        $("log").textContent = data.message || "Reset.";
-        $("diff").textContent = "Nothing yet.";
-        $("status").textContent = "Original resume restored.";
-        $("status").className = "status ok";
-      } catch (err) {
-        $("status").textContent = err.message;
-        $("status").className = "status bad";
-      } finally {
-        $("reset").disabled = false;
-      }
+      try { const d = await post("/api/reset"); $("status").textContent = d.message || "Reset."; $("status").className = "status ok"; $("result").hidden = true; }
+      catch (err) { $("status").textContent = err.message; $("status").className = "status bad"; }
+      finally { $("reset").disabled = false; }
     };
   </script>
 </body>

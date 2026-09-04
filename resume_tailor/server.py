@@ -183,6 +183,7 @@ def _run_tailor_locked(job_description: str, resume_path: Path | None = None) ->
         "match_line": result.match_line,
         "score_inferred": result.score_inferred,
         "changed_lines": report.changed_line_count,
+        "changes": result.changelog,
         "warnings": report.warnings,
         "download": download,
     }
