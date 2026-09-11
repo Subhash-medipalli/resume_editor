@@ -1,0 +1,18 @@
+name: Tests and installed package
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.11"
+      - run: uv sync --locked
+      - run: uv run pytest
+      - run: uv build --wheel
+      - run: uv venv /tmp/resume-tailor-wheel
+      - run: uv pip install --python /tmp/resume-tailor-wheel/bin/python dist/*.whl
+      - run: /tmp/resume-tailor-wheel/bin/python tests/check_installed.py

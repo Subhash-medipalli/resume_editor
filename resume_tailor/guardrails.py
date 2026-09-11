@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import difflib
 import re
+from collections import Counter
 from dataclasses import dataclass, field
+from resume_tailor.structure import DATE_SPAN_RE
 
 MONTH = (
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-)
-DATE_SPAN_RE = re.compile(
-    rf"{MONTH}\s+\d{{4}}\s*[–—-]\s*(?:Present|{MONTH}\s+\d{{4}})",
-    re.IGNORECASE,
 )
 # An email address or a phone number — the details this guardrail exists to protect.
 CONTACT_MARKER_RE = re.compile(
@@ -52,6 +50,11 @@ class GuardrailReport:
     changed_line_count: int = 0
     removed_line_count: int = 0
     added_line_count: int = 0
+    review_items: list[dict] = field(default_factory=list)
+
+    @property
+    def review_required(self) -> bool:
+        return self.ok and bool(self.review_items)
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,7 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
         )
 
     out_facts = extract_facts(out)
+    report.violations.extend(_check_bound_facts(base_n, out))
 
     if len(out_facts.h2_headings) != len(base_facts.h2_headings):
         report.violations.append(
@@ -182,6 +186,14 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     for token in _technology_tokens(out):
         if _stem(token) not in base_tech:
             offenders.add(token.lower())
+    # A product such as Terraform looks like an ordinary word. Inspect names
+    # inside prose too, not only acronym-shaped words or skills lists.
+    for line in out.splitlines():
+        words = line.lstrip("-*# ").split(maxsplit=1)
+        if len(words) == 2:
+            for token in re.findall(r"\b[A-Z][a-z][A-Za-z0-9+#.-]*\b", words[1]):
+                if _stem(token) not in base_tech:
+                    offenders.add(token.lower().rstrip("."))
     already = {_stem(token) for token in _technology_tokens(out)}
 
     def evidenced(token: str) -> bool:
@@ -250,10 +262,87 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
             f"{changed} lines changed — still review, but this is heavier than a typical 1-minute pass."
         )
 
+    # Compare quantities within each changed source passage. A number elsewhere
+    # on the resume cannot vouch for a new metric here; unknown units still have
+    # their numeric value checked. Semantic changes always need human review.
+    report.review_items = review_edits(base_n, out)
+    for item in report.review_items:
+        before_numbers = Counter(_quantities(item["before"]))
+        after_numbers = Counter(_quantities(item["after"]))
+        if before_numbers != after_numbers:
+            report.violations.append(
+                f"Numbers or units changed in {item['section']} (source lines "
+                f"{item['source_lines']}). Keep quantities with their original claims."
+            )
     report.ok = not report.violations
     if not out.endswith("\n"):
         out += "\n"
     return out, report
+
+
+def _fact_text(text: str) -> str:
+    text = DATE_SPAN_RE.sub(lambda m: _canon_span(m.group()), text)
+    return re.sub(r"\s+", " ", text.translate(_TYPOGRAPHY)).strip().lower()
+
+
+def _check_bound_facts(base: str, out: str) -> list[str]:
+    """Keep jobs in order with their own titles/dates, and freeze qualifications."""
+    def jobs(text):
+        records = []
+        for match in H3_RE.finditer(text):
+            body = re.split(r"^#{2,3}\s", text[match.end():], maxsplit=1, flags=re.MULTILINE)[0]
+            first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+            role = first if re.fullmatch(r"\*\*(.+?)\*\*", first) else ""
+            records.append((_fact_text(match.group(1)), _fact_text(role),
+                            tuple(_canon_span(m.group()) for m in DATE_SPAN_RE.finditer(body))))
+        return records
+
+    def qualifications(text):
+        sections = []
+        for match in H2_RE.finditer(text):
+            if re.search(r"educat|academic|certificat|credential|licen[sc]", match.group(1), re.I):
+                body = re.split(r"^##\s", text[match.end():], maxsplit=1, flags=re.MULTILINE)[0]
+                sections.append(_fact_text(body))
+        return sections
+
+    problems = []
+    if jobs(base) != jobs(out):
+        problems.append("A job's employer, title, dates, or order changed. Keep each job's facts together.")
+    if qualifications(base) != qualifications(out):
+        problems.append("Education or certifications changed. Do not add, remove, or rewrite qualifications.")
+    return problems
+
+
+def _quantities(text: str) -> list[str]:
+    # Include bare numbers, versions, percentages, signs, and common units.
+    pattern = r"(?<!\w)[$€£]?\s*\d[\d,]*(?:\.\d+)?\s*[+%]?(?:\s*(?:ms|s|seconds?|minutes?|hours?|days?|weeks?|months?|years?|percent|x|[kmb]|million|billion|users?|customers?|clients?|records?|models?|engineers?|people|teams?|documents?|types?)\b)?"
+    return [re.sub(r"\s+", "", m.group()).lower() for m in re.finditer(pattern, text, re.I)]
+
+
+def review_edits(base: str, out: str) -> list[dict]:
+    """Before/after evidence, aligned within a section or job, with source lines."""
+    def scopes(text):
+        groups = {}
+        section = "Contact and headline"
+        for number, line in enumerate(text.splitlines(), 1):
+            if line.startswith(("## ", "### ")):
+                section = _fact_text(line.lstrip("# "))
+            if line.strip():
+                groups.setdefault(section, []).append((number, line))
+        return groups
+    original, edited = scopes(base), scopes(out)
+    items = []
+    for section in dict.fromkeys([*original, *edited]):
+        old, new = original.get(section, []), edited.get(section, [])
+        matcher = difflib.SequenceMatcher(a=[_fact_text(l) for _, l in old],
+                                         b=[_fact_text(l) for _, l in new], autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag != "equal":
+                items.append({"section": section,
+                              "source_lines": [n for n, _ in old[i1:i2]],
+                              "before": "\n".join(l for _, l in old[i1:i2]),
+                              "after": "\n".join(l for _, l in new[j1:j2])})
+    return items
 
 
 # Phrases a model uses when it is reporting that it deliberately changed nothing.
@@ -330,6 +419,7 @@ def _canon_span(text: str) -> str:
     span = _norm_dashes(re.sub(r"\s+", " ", text).strip())
     span = re.sub(rf"({MONTH})[a-z]*", lambda m: m.group(1)[:3], span, flags=re.IGNORECASE)
     span = re.sub(r"\s*–\s*", "–", span)
+    span = re.sub(r"\b(?:current|now)\b", "Present", span, flags=re.I)
     return span.lower()
 
 

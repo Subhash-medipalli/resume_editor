@@ -1,7 +1,7 @@
 # SAMPLE RESUME — REPLACE ME
 
 > **This is a fictional placeholder, not a real person.** Unit tests use this file.
-> Production content lives in `resume/base.md` and must not be used as a fake.
+> Production content lives in `resume/*.docx` and must not be used as a fake.
 
 **Alex Placeholder** (SAMPLE)
 Independent Contractor · not-a-real-person@example.invalid
