@@ -239,7 +239,7 @@ def test_excessive_additions_are_rejected():
 
 
 def test_a_few_additions_are_allowed_but_warned():
-    padded = SAMPLE_RESUME.rstrip("\n") + "\n- Surfaced an existing Python skill\n"
+    padded = SAMPLE_RESUME.replace("## Skills\n", "## Skills\n- Surfaced an existing Python skill\n")
     _, report = apply_guardrails(SAMPLE_RESUME, padded)
     assert report.ok, report.violations
     assert any("added" in w.lower() for w in report.warnings)

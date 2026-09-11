@@ -10,11 +10,15 @@ formatting (a bold "Languages & Frameworks:" label, say) survives.
 from __future__ import annotations
 
 import copy
+import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from docx import Document
 from docx.text.paragraph import Paragraph
+from docx.table import Table
+from docx.oxml.ns import qn
+from resume_tailor.files import atomic_output, check_output_paths
 
 from resume_tailor.structure import (
     Block,
@@ -29,7 +33,7 @@ MIN_REWRITE_RATIO = 0.35
 
 def find_parent_docx(root: Path) -> Path | None:
     resume_dir = root / "resume"
-    preferred = resume_dir / "Sravya_M_resume.docx"
+    preferred = resume_dir / "Sravya_base.docx"
     if preferred.is_file():
         return preferred
     if not resume_dir.is_dir():
@@ -43,11 +47,19 @@ def find_parent_docx(root: Path) -> Path | None:
 
 
 def iter_paragraphs(document: Document):
-    yield from document.paragraphs
-    for table in document.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                yield from cell.paragraphs
+    """Read paragraphs and nested table cells in their actual XML order."""
+    element = document.element.body if hasattr(document, "element") else document._tc
+    for child in element:
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, document)
+        elif child.tag == qn("w:tbl"):
+            table = Table(child, document)
+            seen = set()
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell._tc not in seen:
+                        seen.add(cell._tc)
+                        yield from iter_paragraphs(cell)
 
 
 def nonempty_paragraphs(document: Document) -> list[Paragraph]:
@@ -56,8 +68,59 @@ def nonempty_paragraphs(document: Document) -> list[Paragraph]:
 
 def document_blocks(document: Document) -> tuple[list[Block], list[Paragraph]]:
     paragraphs = nonempty_paragraphs(document)
-    entries = [(p.text, p.style.name) for p in paragraphs]
+    entries = [(p.text, "List Paragraph" if _has_numbering(p) else p.style.name) for p in paragraphs]
     return parse_paragraphs(entries), paragraphs
+
+
+def _has_numbering(paragraph: Paragraph) -> bool:
+    properties = [paragraph._p.pPr]
+    style = paragraph.style
+    while style is not None:
+        properties.append(style.element.pPr)
+        style = style.base_style
+    return any(p is not None and p.numPr is not None
+               and p.numPr.numId is not None and p.numPr.numId.val != 0 for p in properties)
+
+
+def validate_layout(path: Path) -> None:
+    """Fail before model work when the structure cannot be safely round-tripped."""
+    try:
+        document = Document(str(path))
+    except Exception as exc:
+        raise ValueError("Could not read this Word document. Open it in Word and save it as a .docx file.") from exc
+    problems = []
+    if document.tables:
+        problems.append("tables (use a single-column resume made of paragraphs)")
+    if document.element.xpath(".//w:txbxContent | .//w:drawing | .//w:pict | .//w:ins | .//w:del | .//w:sdt | .//w:fldChar"):
+        problems.append("text boxes, drawings, tracked changes, fields, or content controls")
+    for section in document.sections:
+        cols = section._sectPr.find(qn("w:cols"))
+        if cols is not None and int(cols.get(qn("w:num"), "1")) > 1:
+            problems.append("multiple columns")
+        for part in (section.header, section.footer, section.first_page_header,
+                     section.first_page_footer, section.even_page_header, section.even_page_footer):
+            if part._element.xpath(".//w:t | .//w:drawing | .//w:pict"):
+                problems.append("text or drawings in headers/footers (move resume content into the body)")
+    blocks, _ = document_blocks(document)
+    if any("\n" in b.text for b in blocks):
+        problems.append("manual line breaks inside paragraphs (use separate paragraphs)")
+    if not any(b.kind == "section" for b in blocks):
+        problems.append("no recognizable section headings")
+    in_experience = False
+    has_job = False
+    for index, block in enumerate(blocks):
+        if block.kind == "section":
+            in_experience = bool(re.search(r"experience|employment|work|career|history", block.text, re.I))
+            has_job = False
+        elif in_experience:
+            if block.kind == "job":
+                has_job = True
+                if index + 1 >= len(blocks) or blocks[index + 1].kind != "title":
+                    problems.append("a job heading without a following job-title paragraph")
+            elif not has_job:
+                problems.append("unrecognized job headings (use Company | dates, followed by the job title)")
+    if problems:
+        raise ValueError("Unsupported Word layout: " + "; ".join(dict.fromkeys(problems)) + ". The source was not changed.")
 
 
 def extract_blocks(path: Path) -> list[Block]:
@@ -120,21 +183,8 @@ def _assign_label_value(runs, text: str) -> bool:
     return True
 
 
-def _common_prefix_len(a: str, b: str) -> int:
-    limit = min(len(a), len(b))
-    i = 0
-    while i < limit and a[i] == b[i]:
-        i += 1
-    return i
-
-
 def set_paragraph_text(paragraph: Paragraph, text: str) -> bool:
-    """Rewrite a paragraph, preserving as much run formatting as possible.
-
-    Runs lying entirely inside the unchanged prefix are left alone; the first run
-    that reaches past it absorbs the remainder. Returns False when nothing was
-    changed.
-    """
+    """Map unchanged characters back to their original styled runs."""
     current = paragraph.text or ""
     if _typographically_equal(current, text):
         return False  # identical but for whitespace or quote style
@@ -152,25 +202,19 @@ def set_paragraph_text(paragraph: Paragraph, text: str) -> bool:
     if leading:
         new = leading + new  # keep space-based centring
 
-    keep = _common_prefix_len(old, new)
-    # If the change reaches into the bold label run, letting that run absorb the
-    # remainder would embolden the rest of the line.
-    if keep < len(runs[0].text) and runs[0].bold and _assign_label_value(runs, new):
-        return True
-    consumed = 0
-    absorbed = False
-    for run in runs:
-        start = consumed
-        consumed += len(run.text)
-        if consumed <= keep and not absorbed:
-            continue  # wholly inside the unchanged prefix
-        if not absorbed:
-            run.text = new[start:]
-            absorbed = True
-        else:
-            run.text = ""
-    if not absorbed:
-        runs[-1].text = runs[-1].text + new[keep:]
+    owners = [i for i, run in enumerate(runs) for _ in run.text]
+    values = ["" for _ in runs]
+    for tag, i1, i2, j1, j2 in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag == "equal":
+            for offset, char in enumerate(new[j1:j2]):
+                values[owners[i1 + offset]] += char
+        elif tag in {"insert", "replace"}:
+            owner = owners[min(i1, len(owners) - 1)] if owners else 0
+            # Appended words inherit the final nonempty run, not an empty style run.
+            values[owner] += new[j1:j2]
+    for run, value in zip(runs, values):
+        if run.text != value:
+            run.text = value
     return True
 
 
@@ -319,13 +363,12 @@ def _surviving_anchor(
 
 
 def write_tailored_docx(parent: Path, tailored_text: str, dest: Path) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    check_output_paths([parent], [dest])
     document = Document(str(parent))
     base_blocks, paragraphs = document_blocks(document)
     tailored_blocks = from_markdown(tailored_text)
     if not tailored_blocks:
-        document.save(str(dest))
-        return dest
+        raise ValueError("Cannot write an empty tailored resume.")
 
     removed: set[int] = set()
     # Where the next insert for a given anchor should go. Without this every
@@ -356,5 +399,9 @@ def write_tailored_docx(parent: Path, tailored_text: str, dest: Path) -> Path:
             ) or anchor
             cursor[index] = _clone_paragraph_after(anchor, template, new_block.text)
 
-    document.save(str(dest))
+    with atomic_output(dest, sources=[parent]) as staging:
+        document.save(str(staging))
+        problems = verify_written_docx(staging, tailored_text)
+        if problems:
+            raise ValueError("Word output verification failed: " + "; ".join(problems))
     return dest

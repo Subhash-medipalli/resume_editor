@@ -1,8 +1,15 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from resume_tailor.cli import main
 from resume_tailor.llm import TailorResult, parse_model_output
 from tests.helpers import SAMPLE_RESUME, lightly_tailored, pack_model_output
+
+
+def run_output(out, name):
+    return Path(json.loads((out / "latest.json").read_text())["run"]) / name
 
 
 def test_missing_api_key_exits_2(monkeypatch, capsys, tmp_path):
@@ -56,23 +63,24 @@ def test_cli_writes_new_file_and_leaves_source_untouched(monkeypatch, tmp_path, 
     captured = capsys.readouterr()
     assert code == 0, captured.err
     assert not (out / "resume.md").exists()
-    assert (out / "CHANGELOG.md").is_file()
-    assert (out / "resume.diff").is_file()
+    assert run_output(out, "CHANGELOG.md").is_file()
+    assert run_output(out, "resume.diff").is_file()
     assert resume.read_text(encoding="utf-8") == SAMPLE_RESUME, (
         "the source resume must never be modified"
     )
-    written = (out / "resume_tailored.md").read_text(encoding="utf-8")
+    written = run_output(out, "resume_tailored.md").read_text(encoding="utf-8")
     assert "Northwind Platform Co. (SAMPLE)" in written
     assert "Jul 2023" in written
     assert "not-a-real-person@example.invalid" in written
     assert "AWS-hosted platform work" in written
-    changelog = (out / "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "Retargeted summary" in changelog
+    changelog = run_output(out, "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "Retargeted summary" not in changelog
+    assert "Edited a passage" in changelog
     assert "**Match:**" in changelog
     assert "parent resume left unchanged" in changelog
-    diff = (out / "resume.diff").read_text(encoding="utf-8")
+    diff = run_output(out, "resume.diff").read_text(encoding="utf-8")
     assert "AWS-hosted platform work" in diff
-    assert "Retargeted summary" in captured.out
+    assert "Edited a passage" in captured.out
     assert "resume_tailored" in captured.out
 
 
@@ -92,9 +100,9 @@ def test_cli_reads_jd_from_stdin(monkeypatch, tmp_path, capsys):
 
     code = main(["--jd", "-", "--resume", str(resume), "--out", str(out)])
     assert code == 0
-    assert "Light keyword pass" in (out / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "Edited a passage" in run_output(out, "CHANGELOG.md").read_text(encoding="utf-8")
     assert "AWS-hosted platform work" in (
-        out / "resume_tailored.md"
+        run_output(out, "resume_tailored.md")
     ).read_text(encoding="utf-8")
     assert resume.read_text(encoding="utf-8") == SAMPLE_RESUME
 
@@ -120,11 +128,11 @@ def test_guardrail_failure_does_not_overwrite_source(monkeypatch, tmp_path, caps
 
     code = main(["--jd", str(jd), "--resume", str(resume), "--out", str(out)])
     assert code == 1
-    changelog = (out / "CHANGELOG.md").read_text(encoding="utf-8")
+    changelog = run_output(out, "CHANGELOG.md").read_text(encoding="utf-8")
     assert "Guardrail failures" in changelog
     assert resume.read_text(encoding="utf-8") == SAMPLE_RESUME
-    assert (out / "resume.rejected.md").is_file()
-    assert (out / "resume.diff").is_file()
+    assert run_output(out, "resume.rejected.md").is_file()
+    assert run_output(out, "resume.diff").is_file()
 
 
 def test_first_run_copies_immutable_backup(monkeypatch, tmp_path):
@@ -151,7 +159,7 @@ def test_first_run_copies_immutable_backup(monkeypatch, tmp_path):
     assert original.is_file()
     assert original.read_text(encoding="utf-8") == SAMPLE_RESUME
     assert "AWS-hosted platform work" in (
-        out / "resume_tailored.md"
+        run_output(out, "resume_tailored.md")
     ).read_text(encoding="utf-8")
 
     # Second run must not clobber the backup.
@@ -210,3 +218,25 @@ def test_resume_resolves_to_the_parent_docx_when_base_md_is_absent(tmp_path, mon
 
     monkeypatch.chdir(tmp_path)
     assert _resolve_resume(None).suffix == ".docx"
+
+
+def test_current_base_wins_over_old_word_and_markdown_copies(tmp_path, monkeypatch):
+    from resume_tailor.cli import _load_source_text, _resolve_resume
+    from docx import Document
+
+    resume_dir = tmp_path / "resume"
+    resume_dir.mkdir()
+    for name, identity in (
+        ("Sravya_base.docx", "Current Candidate (SAMPLE)"),
+        ("Sravya_M_resume.docx", "Old Candidate (SAMPLE)"),
+    ):
+        document = Document()
+        document.add_paragraph(identity)
+        document.save(resume_dir / name)
+    (resume_dir / "base.md").write_text("Outdated markdown", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+    source = _resolve_resume(None)
+    assert source == resume_dir / "Sravya_base.docx"
+    assert "Current Candidate (SAMPLE)" in _load_source_text(source)
+    assert "Old Candidate" not in _load_source_text(source)

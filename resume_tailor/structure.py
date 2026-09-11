@@ -31,7 +31,8 @@ MONTH = (
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 )
 DATE_SPAN_RE = re.compile(
-    rf"{MONTH}\s+\d{{4}}\s*[–—-]\s*(?:Present|{MONTH}\s+\d{{4}})",
+    rf"(?:{MONTH}\s+\d{{4}}|(?:0?[1-9]|1[0-2])[/.-]\d{{4}}|\b\d{{4}})"
+    rf"\s*[–—-]\s*(?:Present|Current|Now|{MONTH}\s+\d{{4}}|(?:0?[1-9]|1[0-2])[/.-]\d{{4}}|\d{{4}})\b",
     re.IGNORECASE,
 )
 # "PROFESSIONAL SUMMARY:" — an all-caps line, colon optional.
@@ -89,7 +90,8 @@ def _is_section(text: str, style: str) -> bool:
     letters = [c for c in stripped if c.isalpha()]
     if not letters:
         return False
-    if not (all(c.isupper() for c in letters) and SECTION_RE.match(stripped)):
+    heading_style = style.lower().startswith("heading")
+    if not (heading_style or (all(c.isupper() for c in letters) and SECTION_RE.match(stripped))):
         return False
     words = re.findall(r"[A-Za-z]+", stripped.lower())
     return any(word in SECTION_WORDS for word in words)

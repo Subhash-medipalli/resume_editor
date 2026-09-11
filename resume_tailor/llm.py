@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import ssl
 import time
+import threading
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
@@ -23,6 +26,7 @@ NVIDIA_TIMEOUT = 300
 MAX_ATTEMPTS = 3
 RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRY_BACKOFF_SECONDS = (5, 20)
+DEFAULT_TOTAL_TIMEOUT = 360
 
 
 class LLMError(RuntimeError):
@@ -36,9 +40,6 @@ class TailorResult:
     match_line: str
     match_score: int | None
     raw: str
-    # True when the model gave no SCORE line and the number was inferred from
-    # the good/partial/poor wording rather than stated by the model.
-    score_inferred: bool = False
 
 
 def load_dotenv(path: Path) -> None:
@@ -87,11 +88,18 @@ def complete(
     model: str = DEFAULT_MODEL,
     temperature: float | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    total_timeout: float | None = None,
+    progress=None,
 ) -> str:
     url = base_url.rstrip("/") + "/chat/completions"
     nvidia = _is_nvidia(base_url, model)
-    if nvidia and timeout == DEFAULT_TIMEOUT:
-        timeout = float(os.environ.get("OPENAI_TIMEOUT", NVIDIA_TIMEOUT))
+    if timeout == DEFAULT_TIMEOUT:
+        timeout = float(os.environ.get("OPENAI_TIMEOUT", NVIDIA_TIMEOUT if nvidia else DEFAULT_TIMEOUT))
+    total_timeout = float(os.environ.get("OPENAI_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT)) if total_timeout is None else total_timeout
+    if not all(math.isfinite(value) and value > 0 for value in (timeout, total_timeout)):
+        raise LLMError("Provider timeouts must be finite, positive seconds.")
+    deadline = time.monotonic() + total_timeout
+    progress = progress or (lambda message: None)
     body: dict = {
         "model": model,
         "messages": list(messages),
@@ -124,11 +132,12 @@ def complete(
     )
     last_error: Exception | None = None
     for attempt in range(MAX_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LLMError("The model exceeded the total time limit. Run again when the provider is available.")
+        progress(f"Waiting for model reply — attempt {attempt + 1} of {MAX_ATTEMPTS}")
         try:
-            with urllib.request.urlopen(
-                request, timeout=timeout, context=_ssl_context()
-            ) as response:
-                body = json.loads(response.read().decode("utf-8"))
+            body = _request_with_deadline(request, min(timeout, remaining), remaining)
             break
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")[:2000]
@@ -139,12 +148,17 @@ def complete(
             last_error = LLMError(f"LLM request failed: {exc.reason}")
         except (TimeoutError, OSError) as exc:
             last_error = LLMError(f"LLM request failed: {exc}")
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             last_error = LLMError(f"LLM returned a non-JSON response: {exc}")
 
         if attempt == MAX_ATTEMPTS - 1:
             raise last_error
-        time.sleep(RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)])
+        delay = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
+        remaining = deadline - time.monotonic()
+        if delay >= remaining:
+            raise LLMError("The model exceeded the total time limit. No more retries were started.") from last_error
+        progress(f"Provider unavailable — retrying in {delay:g} seconds")
+        time.sleep(delay)
 
     try:
         choice = body["choices"][0]
@@ -157,8 +171,8 @@ def complete(
                 "LLM returned no answer content (only reasoning). "
                 "Try again, or set NVIDIA_ENABLE_THINKING=0."
             )
-    except (KeyError, IndexError, TypeError) as exc:
-        raise LLMError(f"Unexpected LLM response shape: {body!r}") from exc
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        raise LLMError("Unexpected LLM response shape: an answer message was missing.") from exc
     if not content.strip():
         raise LLMError("LLM returned an empty message.")
 
@@ -173,6 +187,28 @@ def complete(
     return _strip_think(content)
 
 
+def _request_with_deadline(request, timeout: float, remaining: float):
+    # urllib's socket timeout is per operation. A daemon thread bounds the whole
+    # wait, including slow streaming responses; late replies are discarded.
+    # ponytail: a timed-out provider may finish remotely. Add provider-supported
+    # cancellation if the API offers it; never publish a late result.
+    future = Future()
+    def request_json():
+        try:
+            with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            future.set_result(data)
+        except Exception as exc:
+            future.set_exception(exc)
+    threading.Thread(target=request_json, daemon=True).start()
+    try:
+        return future.result(timeout=remaining)
+    except FutureTimeout as exc:
+        if future.done():
+            raise  # a socket timeout from the request is eligible for retry
+        raise LLMError("The model exceeded the total time limit. Its late reply will not be used.") from exc
+
+
 def tailor_resume(
     *,
     resume_markdown: str,
@@ -182,6 +218,7 @@ def tailor_resume(
     model: str = DEFAULT_MODEL,
     temperature: float | None = None,
     complete_fn=complete,
+    progress=None,
 ) -> TailorResult:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -199,22 +236,18 @@ def tailor_resume(
         base_url=base_url,
         model=model,
         temperature=temperature,
+        progress=progress,
     )
     return parse_model_output(raw)
 
 
-def _parse_match(chunk: str) -> tuple[int | None, str, bool]:
-    """Return (score, match_line, inferred).
-
-    `inferred` is True when the model gave no SCORE line and the number was
-    guessed from the good/partial/poor wording — the caller must not present
-    such a number as the model's own judgement.
-    """
+def _parse_match(chunk: str) -> tuple[int | None, str]:
+    """Keep absent, malformed, or out-of-range scores unknown."""
     score: int | None = None
     rest: list[str] = []
     # Tolerates "SCORE: 88", "**SCORE:** 88", "- Score = 88", "SCORE: 88/100".
     pattern = re.compile(
-        r"^[\s\-*_#>]*\**\s*score\s*\**\s*[:=]\s*\**\s*(\d{1,3})",
+        r"^[\s\-*_#>]*\**\s*score\s*\**\s*[:=]\s*\**\s*(\d{1,3})(?:\s*/\s*100)?[\s*]*$",
         re.IGNORECASE,
     )
     for raw in chunk.splitlines():
@@ -223,18 +256,12 @@ def _parse_match(chunk: str) -> tuple[int | None, str, bool]:
             continue
         match = pattern.match(line)
         if match:
-            score = max(0, min(100, int(match.group(1))))
+            value = int(match.group(1))
+            score = value if 0 <= value <= 100 else None
             continue
         rest.append(line)
     match_line = " ".join(rest)
-    inferred = False
-    if score is None:
-        low = match_line.lower()
-        for prefix, value in (("good", 85), ("partial", 62), ("poor", 38)):
-            if low.startswith(prefix):
-                score, inferred = value, True
-                break
-    return score, match_line, inferred
+    return score, match_line
 
 
 def parse_model_output(text: str) -> TailorResult:
@@ -250,7 +277,7 @@ def parse_model_output(text: str) -> TailorResult:
     ]
     if not changelog:
         raise LLMError("Model output had an empty CHANGELOG section.")
-    match_score, match_line, score_inferred = _parse_match(match_chunk)
+    match_score, match_line = _parse_match(match_chunk)
     if not match_line:
         raise LLMError("Model output had an empty MATCH section.")
     resume_markdown = resume_chunk.strip()
@@ -262,7 +289,6 @@ def parse_model_output(text: str) -> TailorResult:
         match_line=match_line,
         match_score=match_score,
         raw=text,
-        score_inferred=score_inferred,
     )
 
 
