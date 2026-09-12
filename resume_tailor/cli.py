@@ -11,8 +11,8 @@ from pathlib import Path
 from resume_tailor.files import atomic_output, check_output_paths, write_text
 
 from resume_tailor.pipeline import (
-    _original_path, _load_source_text, _output_paths, _write_outputs,
-    _render_changelog, verify_output, run_tailoring,
+    _load_source_text, _original_path, _output_paths, _write_outputs,
+    _render_changelog, run_tailoring,
 )
 from resume_tailor.llm import (
     DEFAULT_BASE_URL,
@@ -49,7 +49,7 @@ def main(argv: list[str] | None = None) -> int:
         return _reset(args)
 
     if not args.jd:
-        sys.stderr.write("error: --jd is required (or pass --reset / --serve).\n")
+        sys.stderr.write("error: --jd is required (or pass --serve / --reset).\n")
         return 2
 
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -59,16 +59,90 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         job_description = _read_jd(args.jd)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+
+    out_dir = Path(args.out)
+    base_url = (
+        args.base_url
+        or os.environ.get("OPENAI_BASE_URL", "").strip()
+        or DEFAULT_BASE_URL
+    )
+    model = args.model or os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_MODEL
+
+    batch_mode = bool(args.batch or args.resumes)
+    try:
+        if batch_mode:
+            result = _run_batch(
+                job_description=job_description,
+                resumes=args.resumes,
+                resume=args.resume,
+                jd_spec=args.jd,
+                out_dir=out_dir,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                two_pass=args.two_pass,
+            )
+            write_text(
+                out_dir / "latest.json",
+                json.dumps({
+                    "batch": str(result["batch_id"]),
+                    "status": "batch-complete",
+                    "results": result["results"],
+                }),
+                sources=[],
+            )
+            for item in result["results"]:
+                if item.get("ok"):
+                    sys.stdout.write(f"Ranked run: {item['resume']} score={item.get('coverage_score')} match={item.get('match_score')}\n")
+                else:
+                    sys.stdout.write(f"Run failed: {item['resume']}\n")
+            return 0 if any(item.get("ok") for item in result["results"]) else 1
+
         resume_path = _resolve_resume(args.resume)
-        out_dir = Path(args.out)
-        paths, parent_docx = _output_paths(resume_path, out_dir)
-        protected = [resume_path, _original_path(resume_path)]
-        if parent_docx is not None:
-            protected.append(parent_docx)
-        if args.jd != "-":
-            protected.append(Path(args.jd))
-        check_output_paths(protected, [*paths.values(), out_dir / "latest.json"])
-        _ensure_original_backup(resume_path)
+        _run_single_preflight(resume_path, out_dir, args)
+        from resume_tailor.files import new_run_dir
+        run_dir = new_run_dir(out_dir)
+
+        legacy = [p for p in _output_paths(resume_path, out_dir)[0].values() if p.exists() or p.is_symlink()]
+        if legacy:
+            archive = run_dir / "previous-output"
+            archive.mkdir()
+            for path in legacy:
+                path.rename(archive / path.name)
+
+        sys.stdout.write(f"Run files: {run_dir}\n")
+        write_text(out_dir / "latest.json", json.dumps({"run": str(run_dir), "status": "working"}), sources=[])
+        result = run_tailoring(
+            job_description=job_description, resume_path=resume_path, out_dir=run_dir,
+            api_key=api_key, base_url=base_url, model=model,
+            complete_fn=complete,
+            protected_sources=[resume_path],
+            progress=lambda message: print(message, file=sys.stderr),
+            two_pass=args.two_pass,
+        )
+        write_text(
+            out_dir / "latest.json",
+            json.dumps(
+                {
+                    "run": str(run_dir),
+                    "status": "draft" if result["ok"] else "failed",
+                    "resume": result.get("resume_path") if result["ok"] else None,
+                    "coverage": result.get("coverage"),
+                    "coverage_score": result.get("coverage_score"),
+                    "passes": result.get("passes"),
+                }
+            ),
+            sources=[resume_path],
+        )
+        if result["ok"]:
+            sys.stdout.write(f"Wrote draft for factual review: {result['resume_path']}\n")
+        else:
+            sys.stderr.write(f"Run failed: {result.get('error') or '; '.join(result['violations'])}\n")
+        sys.stdout.write(result.get("changelog", ""))
+        return 0 if result["ok"] else 1
     except OSError as exc:
         sys.stderr.write(f"{exc}\n")
         return 1
@@ -76,40 +150,106 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"{exc}\n")
         return 1
 
-    base_url = (
-        args.base_url
-        or os.environ.get("OPENAI_BASE_URL", "").strip()
-        or DEFAULT_BASE_URL
-    )
-    model = args.model or os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_MODEL
-    out_dir = Path(args.out)
 
+def _run_single_preflight(resume_path: Path, out_dir: Path, args: argparse.Namespace) -> None:
+    paths, parent_docx = _output_paths(resume_path, out_dir)
+    protected = [resume_path, _original_path(resume_path)]
+    if parent_docx is not None:
+        protected.append(parent_docx)
+    if args.jd != "-":
+        protected.append(Path(args.jd))
+    check_output_paths(protected, [*paths.values(), out_dir / "latest.json"])
+    _ensure_original_backup(resume_path)
+
+
+def _run_batch(
+    *,
+    job_description: str,
+    resumes: list[str],
+    resume: str | None,
+    jd_spec: str | None,
+    out_dir: Path,
+    api_key: str,
+    base_url: str,
+    model: str,
+    two_pass: bool,
+) -> dict:
     from resume_tailor.files import new_run_dir
-    run_dir = new_run_dir(out_dir)
-    legacy = [p for p in paths.values() if p.exists() or p.is_symlink()]
-    if legacy:
-        archive = run_dir / "previous-output"
-        archive.mkdir()
-        for path in legacy:
-            path.rename(archive / path.name)
-    sys.stdout.write(f"Run files: {run_dir}\n")
-    write_text(out_dir / "latest.json", json.dumps({"run": str(run_dir), "status": "working"}), sources=protected)
-    result = run_tailoring(
-        job_description=job_description, resume_path=resume_path, out_dir=run_dir,
-        api_key=api_key, base_url=base_url, model=model, complete_fn=complete,
-        protected_sources=protected, progress=lambda message: print(message, file=sys.stderr),
+
+    resume_paths = []
+    if resume:
+        resume_paths.append(_resolve_resume(resume))
+    for path in resumes:
+        resume_paths.append(_resolve_resume(path))
+    if not resume_paths:
+        raise ValueError("No resumes provided for batch mode.")
+
+    seen = set()
+    unique = []
+    for path in resume_paths:
+        real = path.resolve()
+        if real in seen:
+            continue
+        seen.add(real)
+        unique.append(path)
+
+    batch_root = new_run_dir(out_dir)
+    results = []
+    for idx, resume_path in enumerate(unique, start=1):
+        _ensure_original_backup(resume_path)
+        run_dir = batch_root / f"{idx:02d}-{resume_path.stem}"
+        run_dir.mkdir()
+        _run_single_preflight(
+            resume_path=resume_path,
+            out_dir=run_dir,
+            args=argparse.Namespace(
+                jd=jd_spec if jd_spec is not None else "-",
+                resume=str(resume_path),
+            ),
+        )
+        protected = [resume_path, _original_path(resume_path)]
+        try:
+            result = run_tailoring(
+                job_description=job_description,
+                resume_path=resume_path,
+                out_dir=run_dir,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                complete_fn=complete,
+                protected_sources=protected,
+                progress=lambda message: print(message, file=sys.stderr),
+                two_pass=two_pass,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "error": str(exc), "run_id": run_dir.name}
+
+        result = dict(result)
+        result.setdefault("resume", str(resume_path))
+        result.setdefault("run_id", run_dir.name)
+        result["batch_position"] = idx
+        results.append(result)
+
+    ranked = sorted(
+        results,
+        key=lambda row: (
+            row.get("coverage_score", -1),
+            row.get("match_score", -1) if row.get("match_score") is not None else -1,
+            bool(row.get("ok")),
+        ),
+        reverse=True,
     )
-    write_text(out_dir / "latest.json", json.dumps({"run": str(run_dir), "status": "draft" if result["ok"] else "failed", "resume": result.get("resume_path") if result["ok"] else None}), sources=protected)
-    if result["ok"]:
-        sys.stdout.write(f"Wrote draft for factual review: {result['resume_path']}\n")
-    else:
-        sys.stderr.write(f"Run failed: {result.get('error') or '; '.join(result['violations'])}\n")
-    sys.stdout.write(result.get("changelog", ""))
-    return 0 if result["ok"] else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    batch_summary = {
+        "batch_id": str(batch_root),
+        "results": ranked,
+        "job_description_length": len(job_description),
+        "resume_count": len(ranked),
+    }
+    write_text(batch_root / "batch-summary.json", json.dumps(batch_summary, indent=2), sources=[])
+    return {
+        "batch_id": batch_root,
+        "results": ranked,
+    }
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -130,6 +270,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--resume",
         default=None,
         help="Path to the source resume (default: the parent .docx). Never modified.",
+    )
+    parser.add_argument(
+        "--resumes",
+        action="append",
+        default=[],
+        help="Additional resume paths for batch mode. Use with --batch.",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Run all resumes in a batch and rank the outputs.",
+    )
+    parser.add_argument(
+        "--two-pass",
+        action="store_true",
+        help="Run a factual pass then a positioning polish pass.",
     )
     parser.add_argument(
         "--out",
@@ -228,3 +384,7 @@ def _reset(args: argparse.Namespace) -> int:
         shutil.copyfile(original, staging)
     sys.stdout.write(f"Restored {resume_path} from {original}\n")
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

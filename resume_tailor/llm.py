@@ -17,6 +17,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from resume_tailor.prompt import SYSTEM_PROMPT, build_user_prompt
+from resume_tailor.jd_profile import JDProfile
+from resume_tailor.resume_profile import ResumeProfile
+from resume_tailor.role_profiles import RoleProfile
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
@@ -219,6 +222,12 @@ def tailor_resume(
     temperature: float | None = None,
     complete_fn=complete,
     progress=None,
+    jd_profile: JDProfile | None = None,
+    resume_profile: ResumeProfile | None = None,
+    role_profile: RoleProfile | None = None,
+    pass_type: str = "positioning",
+    include_coverage: bool = False,
+    coverage: dict | None = None,
 ) -> TailorResult:
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -227,6 +236,12 @@ def tailor_resume(
             "content": build_user_prompt(
                 resume_markdown=resume_markdown,
                 job_description=job_description,
+                jd_profile=jd_profile,
+                resume_profile=resume_profile,
+                role_profile=role_profile,
+                pass_type=pass_type,
+                include_coverage=include_coverage,
+                coverage=coverage,
             ),
         },
     ]
