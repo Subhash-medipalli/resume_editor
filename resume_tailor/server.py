@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import json
+import base64
 import hashlib
+import json
 import re
 import threading
+import uuid
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from resume_tailor.cli import _original_path, _resolve_resume
-from resume_tailor.files import atomic_output, new_run_dir, write_text
+from resume_tailor.files import new_run_dir, write_text
 from resume_tailor.pipeline import run_tailoring, validate_job_description
 from resume_tailor.llm import DEFAULT_BASE_URL, DEFAULT_MODEL, complete, load_dotenv
 
@@ -40,49 +42,200 @@ def _json_bytes(payload: dict, status: int = 200) -> tuple[int, bytes, str]:
 
 
 
-def _save_attached_resume(payload: dict, run_dir: Path) -> Path | None:
-    """Optional base64 .docx from the browser. None = use the in-repo resume."""
-    import base64
-    import re
+_MISSING_BASE = (
+    "Attach a .docx base resume, or choose a previously uploaded one."
+)
 
-    b64 = str(payload.get("resume_b64") or "").strip()
-    if not b64:
-        return None
-    name = str(payload.get("resume_name") or "attached.docx")
-    name = Path(name).name
-    if not name.lower().endswith(".docx"):
+
+def _library_root() -> Path:
+    return ROOT / "out" / "library" / "resumes"
+
+
+def _safe_docx_name(name: str) -> str:
+    cleaned = Path(str(name or "attached.docx")).name
+    if not cleaned.lower().endswith(".docx"):
         raise ValueError("Attached resume must be a .docx file.")
-    # strip data-url prefix if present
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", cleaned).strip("._") or "attached"
+    if not safe.lower().endswith(".docx"):
+        safe += ".docx"
+    return safe
+
+
+def _validate_docx_bytes(data: bytes) -> None:
+    if len(data) < 100 or data[:2] != b"PK":
+        raise ValueError("Attached file does not look like a .docx (zip) file.")
+    if len(data) > 5_000_000:
+        raise ValueError("Attached resume is too large (max 5 MB).")
+
+
+def _decode_upload(payload: dict) -> tuple[str, str, bytes]:
+    b64 = str(payload.get("resume_b64") or "").strip()
     if "," in b64 and b64.lower().startswith("data:"):
         b64 = b64.split(",", 1)[1]
     try:
         data = base64.b64decode(b64, validate=True)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"Could not decode attached resume: {exc}") from exc
-    if len(data) < 100 or data[:2] != b"PK":
-        raise ValueError("Attached file does not look like a .docx (zip) file.")
-    if len(data) > 5_000_000:
-        raise ValueError("Attached resume is too large (max 5 MB).")
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "attached.docx"
+    _validate_docx_bytes(data)
+    original = Path(str(payload.get("resume_name") or "attached.docx")).name
+    return original, _safe_docx_name(original), data
+
+
+def _store_library_resume(filename: str, data: bytes, original_name: str) -> str:
+    resume_id = uuid.uuid4().hex
+    folder = _library_root() / resume_id
+    folder.mkdir(parents=True, mode=0o700)
+    safe = _safe_docx_name(filename)
+    with (folder / safe).open("xb") as stream:
+        stream.write(data)
+    write_text(folder / "meta.json", json.dumps({
+        "id": resume_id,
+        "filename": safe,
+        "original_name": Path(original_name).name,
+        "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "bytes": len(data),
+    }))
+    return resume_id
+
+
+def _read_library_resume(resume_id: str) -> tuple[dict, bytes]:
+    if not re.fullmatch(r"[0-9a-f]{32}", resume_id):
+        raise ValueError("Unknown saved resume.")
+    library = _library_root().resolve()
+    folder = (library / resume_id).resolve()
+    if folder.parent != library:
+        raise ValueError("Unknown saved resume.")
+    try:
+        meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("Unknown saved resume.") from exc
+    if not isinstance(meta, dict):
+        raise ValueError("Saved resume is invalid.")
+    filename = meta.get("filename")
+    if not isinstance(filename, str) or Path(filename).name != filename or not filename.lower().endswith(".docx"):
+        raise ValueError("Saved resume is invalid.")
+    dest = folder / filename
+    if dest.is_symlink() or not dest.is_file() or dest.resolve().parent != folder:
+        raise ValueError("Saved resume is invalid.")
+    data = dest.read_bytes()
+    _validate_docx_bytes(data)
+    return meta, data
+
+
+def _selection_from_payload(payload: dict) -> tuple[str, bytes, str | None, str]:
+    """Return disk filename, bytes, library id, and the name to show.
+
+    A new upload returns library id None; the caller stores it. Neither an
+    upload nor a saved id means there is no base — never a built-in sample.
+    """
+    if str(payload.get("resume_b64") or "").strip():
+        original, filename, data = _decode_upload(payload)
+        return filename, data, None, original
+    resume_id = str(payload.get("resume_id") or "").strip()
+    if resume_id:
+        meta, data = _read_library_resume(resume_id)
+        shown = meta.get("original_name") if isinstance(meta.get("original_name"), str) else meta["filename"]
+        return str(meta["filename"]), data, resume_id, shown
+    raise ValueError(_MISSING_BASE)
+
+
+def _snapshot_into_run(run_dir: Path, filename: str, data: bytes) -> Path:
     dest_dir = run_dir / "source"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / safe
+    dest = dest_dir / _safe_docx_name(filename)
     with dest.open("xb") as stream:
         stream.write(data)
     return dest
 
 
-def _run_tailor(job_description: str, resume_path: Path | None = None, *, run_dir: Path | None = None) -> dict:
-    run_dir = run_dir or _new_run_dir()
-    source = resume_path or _resolve_resume(None)
-    if source.suffix.lower() != ".docx":
-        raise ValueError("The browser requires a Word .docx base resume.")
-    snapshot = run_dir / "source" / source.name
-    if source.resolve() != snapshot.resolve():
-        snapshot.parent.mkdir(parents=True, exist_ok=True)
-        with snapshot.open("xb") as stream:
-            stream.write(source.read_bytes())
-    return _execute_run(job_description, snapshot, run_dir)
+def _write_run_meta(run_dir: Path, *, source_name: str, resume_id: str, jd: str) -> None:
+    write_text(run_dir / "meta.json", json.dumps({
+        "id": run_dir.name,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source_name": source_name,
+        "resume_id": resume_id,
+        "jd_preview": " ".join(jd.split())[:160],
+    }))
+
+
+def _list_resumes() -> list[dict]:
+    root = _library_root()
+    if not root.is_dir():
+        return []
+    items = []
+    for folder in root.iterdir():
+        if not re.fullmatch(r"[0-9a-f]{32}", folder.name):
+            continue
+        try:
+            meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            continue
+        if not isinstance(meta, dict) or meta.get("id") != folder.name:
+            continue
+        items.append({
+            "id": folder.name,
+            "filename": meta.get("filename") if isinstance(meta.get("filename"), str) else "",
+            "original_name": meta.get("original_name") if isinstance(meta.get("original_name"), str) else meta.get("filename"),
+            "saved_at": meta.get("saved_at") if isinstance(meta.get("saved_at"), str) else "",
+            "bytes": meta.get("bytes") if isinstance(meta.get("bytes"), int) else None,
+        })
+    items.sort(key=lambda item: item["saved_at"], reverse=True)
+    return items[:50]
+
+
+def _list_runs() -> list[dict]:
+    root = ROOT / "out" / "runs"
+    if not root.is_dir():
+        return []
+    items = []
+    for folder in root.iterdir():
+        if not re.fullmatch(r"[0-9a-f]{32}", folder.name):
+            continue
+        meta = {}
+        try:
+            loaded = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                meta = loaded
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            meta = {}
+        state, ok = "unknown", None
+        try:
+            status = json.loads((folder / "status.json").read_text(encoding="utf-8"))
+            if isinstance(status, dict):
+                state = status.get("state") if status.get("state") in {"working", "complete"} else "unknown"
+                if state == "complete" and isinstance(status.get("result"), dict):
+                    ok = bool(status["result"].get("ok"))
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            pass
+        download, filename = None, None
+        try:
+            result = json.loads((folder / "result.json").read_text(encoding="utf-8"))
+            if isinstance(result, dict) and result.get("status") == "ready":
+                name = result.get("file")
+                if isinstance(name, str) and Path(name).name == name and name.endswith(".docx"):
+                    filename = name
+                    download = f"/api/download/{folder.name}"
+        except (OSError, json.JSONDecodeError, UnicodeError):
+            pass
+        created = meta.get("created_at") if isinstance(meta.get("created_at"), str) else ""
+        if not created:
+            created = datetime.fromtimestamp(folder.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+        source_name = meta.get("source_name") if isinstance(meta.get("source_name"), str) else ""
+        preview = meta.get("jd_preview") if isinstance(meta.get("jd_preview"), str) else ""
+        resume_id = meta.get("resume_id") if isinstance(meta.get("resume_id"), str) else ""
+        items.append({
+            "id": folder.name,
+            "created_at": created,
+            "source_name": source_name,
+            "resume_id": resume_id,
+            "jd_preview": preview,
+            "state": state,
+            "ok": ok,
+            "download": download,
+            "file": filename,
+        })
+    items.sort(key=lambda item: item["created_at"], reverse=True)
+    return items[:50]
 
 
 def _execute_run(job_description: str, resume_path: Path, out_dir: Path) -> dict:
@@ -108,12 +261,16 @@ def _execute_run(job_description: str, resume_path: Path, out_dir: Path) -> dict
     return result
 
 
-def _finish_run(jd: str, attached: Path | None, run_dir: Path) -> None:
+def _finish_run(jd: str, snapshot: Path, run_dir: Path, resume_id: str) -> None:
     try:
         try:
-            result = _run_tailor(jd, attached, run_dir=run_dir)
+            result = _execute_run(jd, snapshot, run_dir)
+            result["resume_id"] = resume_id
         except Exception as exc:
-            result = {"ok": False, "error": str(exc), "download": None, "run_id": run_dir.name}
+            result = {
+                "ok": False, "error": str(exc), "download": None,
+                "run_id": run_dir.name, "resume_id": resume_id,
+            }
         write_text(run_dir / "status.json", json.dumps({"state": "complete", "result": result}))
     finally:
         _TAILOR_LOCK.release()
@@ -140,15 +297,13 @@ def _read_result(run_id: str) -> tuple[Path, dict, bytes]:
 
 
 def _run_reset() -> dict:
-    resume_path = _resolve_resume(None)
-    original = _original_path(resume_path)
-    if not original.is_file():
-        return {"ok": False, "error": f"No backup at {original}."}
-    import shutil
-
-    with atomic_output(resume_path, sources=[original]) as staging:
-        shutil.copyfile(original, staging)
-    return {"ok": True, "message": f"Restored {resume_path} from {original}"}
+    return {
+        "ok": False,
+        "error": (
+            "There is no built-in base resume to restore. "
+            "Use the CLI: --reset --resume PATH."
+        ),
+    }
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -186,10 +341,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, html, "text/html; charset=utf-8")
             return
         if path == "/api/health":
-            from resume_tailor.docx_io import find_parent_docx
-
-            base = find_parent_docx(ROOT)
-            status, body, ctype = _json_bytes({"ok": True, "base": base.name if base else None})
+            status, body, ctype = _json_bytes({"ok": True, "base": None})
+            self._send(status, body, ctype)
+            return
+        if path == "/api/library":
+            status, body, ctype = _json_bytes({"resumes": _list_resumes()})
+            self._send(status, body, ctype)
+            return
+        if path == "/api/runs":
+            status, body, ctype = _json_bytes({"runs": _list_runs()})
             self._send(status, body, ctype)
             return
         if path.startswith("/api/status/"):
@@ -277,20 +437,33 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as exc:
                     self._send(*_json_bytes({"ok": False, "error": str(exc)}, 400))
                     return
+                try:
+                    filename, data, library_id, original_name = _selection_from_payload(payload)
+                except ValueError as exc:
+                    self._send(*_json_bytes({"ok": False, "error": str(exc)}, 400))
+                    return
                 if not _TAILOR_LOCK.acquire(blocking=False):
                     self._send(*_json_bytes({"ok": False, "error": "Another resume is being processed. Wait for it to finish, then run again."}, 409))
                     return
                 try:
+                    if library_id is None:
+                        library_id = _store_library_resume(filename, data, original_name)
                     run_dir = _new_run_dir()
-                    attached = _save_attached_resume(payload, run_dir)
+                    snapshot = _snapshot_into_run(run_dir, filename, data)
+                    _write_run_meta(run_dir, source_name=original_name, resume_id=library_id, jd=payload["jd"])
                     write_text(run_dir / "status.json", json.dumps({"state": "working", "message": "Preparing the source resume"}))
-                    worker = threading.Thread(target=_finish_run, args=(payload["jd"], attached, run_dir), daemon=True)
+                    worker = threading.Thread(
+                        target=_finish_run, args=(payload["jd"], snapshot, run_dir, library_id), daemon=True,
+                    )
                     worker.start()
                 except Exception as exc:
                     _TAILOR_LOCK.release()
                     self._send(*_json_bytes({"ok": False, "error": str(exc)}, 400))
                     return
-                self._send(*_json_bytes({"ok": True, "run_id": run_dir.name, "status": f"/api/status/{run_dir.name}"}, 202))
+                self._send(*_json_bytes({
+                    "ok": True, "run_id": run_dir.name,
+                    "status": f"/api/status/{run_dir.name}", "resume_id": library_id,
+                }, 202))
                 return
             if path.startswith("/api/review/"):
                 try:

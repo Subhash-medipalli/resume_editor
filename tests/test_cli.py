@@ -203,40 +203,46 @@ def test_tailor_result_roundtrip_used_by_cli():
     assert result.changelog == ["x"]
 
 
-def test_resume_resolves_to_the_parent_docx_when_base_md_is_absent(tmp_path, monkeypatch):
-    """base.md is a stale copy; deleting it must not break the tool."""
+def test_missing_resume_is_rejected_even_when_a_docx_is_present(tmp_path, monkeypatch, capsys):
     pytest.importorskip("docx")
     from docx import Document
-
-    from resume_tailor.cli import _resolve_resume
 
     resume_dir = tmp_path / "resume"
     resume_dir.mkdir()
     document = Document()
     document.add_paragraph("Alex Placeholder (SAMPLE)")
-    document.save(str(resume_dir / "Someone_resume.docx"))
-
+    document.save(resume_dir / "Someone_resume.docx")
+    jd = tmp_path / "jd.txt"
+    jd.write_text("Python contractor\n", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.chdir(tmp_path)
-    assert _resolve_resume(None).suffix == ".docx"
+
+    code = main(["--jd", str(jd)])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "No base resume" in err
+    assert not (tmp_path / "out").exists()
 
 
-def test_current_base_wins_over_old_word_and_markdown_copies(tmp_path, monkeypatch):
+def test_explicit_resume_path_is_required_and_used(tmp_path):
     from resume_tailor.cli import _load_source_text, _resolve_resume
     from docx import Document
 
     resume_dir = tmp_path / "resume"
     resume_dir.mkdir()
-    for name, identity in (
-        ("Sravya_base.docx", "Current Candidate (SAMPLE)"),
-        ("Sravya_M_resume.docx", "Old Candidate (SAMPLE)"),
+    chosen = resume_dir / "chosen.docx"
+    other = resume_dir / "other.docx"
+    for path, identity in (
+        (chosen, "Chosen Candidate (SAMPLE)"),
+        (other, "Other Candidate (SAMPLE)"),
     ):
         document = Document()
         document.add_paragraph(identity)
-        document.save(resume_dir / name)
-    (resume_dir / "base.md").write_text("Outdated markdown", encoding="utf-8")
+        document.save(path)
 
-    monkeypatch.chdir(tmp_path)
-    source = _resolve_resume(None)
-    assert source == resume_dir / "Sravya_base.docx"
-    assert "Current Candidate (SAMPLE)" in _load_source_text(source)
-    assert "Old Candidate" not in _load_source_text(source)
+    with pytest.raises(ValueError, match="No base resume"):
+        _resolve_resume(None)
+    source = _resolve_resume(str(chosen))
+    assert source == chosen
+    assert "Chosen Candidate (SAMPLE)" in _load_source_text(source)
+    assert "Other Candidate" not in _load_source_text(source)

@@ -32,10 +32,12 @@ MIN_REWRITE_RATIO = 0.35
 
 
 def find_parent_docx(root: Path) -> Path | None:
+    """Return a non-tailored .docx under resume/, if a caller left one there.
+
+    Tailoring does not use this as a default. Pass an explicit resume. The
+    lookup only supports a legacy markdown file that sits beside a Word export.
+    """
     resume_dir = root / "resume"
-    preferred = resume_dir / "Sravya_base.docx"
-    if preferred.is_file():
-        return preferred
     if not resume_dir.is_dir():
         return None
     for path in sorted(resume_dir.glob("*.docx")):
