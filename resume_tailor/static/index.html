@@ -274,6 +274,7 @@
       if (pendingReview !== review) return;
       $("dl").href = data.download; $("dl").hidden = false;
       $("review").hidden = true; pendingReview = null;
+      loadHistory();
       $("dl").focus();
     } catch (e) {
       if (pendingReview !== review) return;
