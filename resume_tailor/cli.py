@@ -116,9 +116,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m resume_tailor",
         description=(
-            "Make surgical edits to the parent Word resume for a job "
-            "description. Writes a NEW tailored .docx plus a changelog and "
-            "unified diff to out/runs/<run-id>/. The parent resume is never modified."
+            "Make surgical edits to a Word resume for a job description. "
+            "Pass --resume PATH. Writes a NEW tailored .docx plus a changelog "
+            "and unified diff to out/runs/<run-id>/. The source resume is never modified."
         ),
     )
     parser.add_argument(
@@ -129,7 +129,7 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--resume",
         default=None,
-        help="Path to the source resume (default: the parent .docx). Never modified.",
+        help="Path to the source resume. Required for tailoring and --reset. Never modified.",
     )
     parser.add_argument(
         "--out",
@@ -180,26 +180,15 @@ def _read_jd(spec: str) -> str:
 
 
 def _resolve_resume(explicit: str | None) -> Path:
-    if explicit:
-        path = Path(explicit)
-        if not path.is_file():
-            raise ValueError(f"Resume not found: {path}")
-        return path
-    # Prefer the source Word file to a legacy markdown copy. Resolve each root
-    # fully so a resume in the working directory wins over the package location.
-    from resume_tailor.docx_io import find_parent_docx
-
-    for root in (Path.cwd(), Path(__file__).resolve().parent.parent):
-        parent = find_parent_docx(root)
-        if parent is not None:
-            return parent
-        path = root / "resume" / "base.md"
-        if path.is_file():
-            return path
-    raise ValueError(
-        "Could not find a resume in resume/ (expected a .docx, or base.md). "
-        "Pass --resume PATH or run from the repo root."
-    )
+    if not explicit:
+        raise ValueError(
+            "No base resume selected. Pass --resume PATH to a .docx file. "
+            "This app does not ship a personal sample resume."
+        )
+    path = Path(explicit)
+    if not path.is_file():
+        raise ValueError(f"Resume not found: {path}")
+    return path
 
 
 def _ensure_original_backup(resume_path: Path) -> None:

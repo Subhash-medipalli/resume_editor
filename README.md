@@ -5,9 +5,13 @@ Paste a job description. Review the proposed edits, then download a **new Word r
 This is a surgical editor for contract-to-contract tailoring. It aims for a few edits that a human can review in about 1–5 minutes. Automated checks catch many unsupported facts, but cannot establish the truth of every reworded claim. Every substantive edited browser result requires factual review before download.
 
 
-## Attach a base resume
+## Upload a base resume
 
-In the UI, **change** beside **Base resume** accepts an optional `.docx`. Each run saves its own input under `out/runs/<run-id>/source/`, so uploads with the same name stay separate. If you leave it empty, the app snapshots `resume/Sravya_base.docx` for the run.
+There is no built-in resume. In the UI, **upload** beside **Base resume** requires a `.docx`, or choose one already listed under **Saved resumes**. If neither is selected, tailoring stops with an error and does not substitute a sample. Each upload is stored under `out/library/resumes/<id>/` with the original filename, a timestamp, and an id. Choosing a saved resume again does not create a second copy.
+
+Each tailor run still keeps its own snapshot under `out/runs/<run-id>/source/`, plus the tailored docx, changelog, diff, and review state. **Previous jobs** lists those runs. After you confirm review, that row's **Download** link fetches the same verified file as `/api/download/<run-id>`.
+
+The old personal setup, including `resume/Sravya_base.docx`, is preserved on the `sravya` branch. `main` does not use it.
 
 After a run, **What changed** shows the original and edited passages with their source sections. Check that every change describes the candidate's real experience, select the review checkbox, and click **Confirm review**. This enables **Download Word resume** for that exact file. A failed run has no download.
 
@@ -19,7 +23,7 @@ month names, numeric month/year, or years alone; `Present`, `Current`, and `Now`
 are recognized. Tables, multiple columns, text boxes, resume content in headers
 or footers, tracked changes, content controls, fields, and manual line breaks
 inside paragraphs are rejected before model work with an explanation. The
-supplied base passes these checks. The text extractor reads tables in document
+A simple single-column resume passes these checks. The text extractor reads tables in document
 order, but tailoring table layouts is deliberately unsupported.
 
 ## How the site is built
@@ -27,7 +31,7 @@ order, but tailoring table layouts is deliberately unsupported.
 There is no React app, no Node server, and no database. One small Python package does everything:
 
 1. **Browser UI** — a single static page (`resume_tailor/static/index.html`) served by Python’s stdlib `http.server`. You paste a JD and click **Tailor resume**.
-2. **API** — `POST /api/tailor` with `{ "jd": "..." }` returns **202** and a `status` URL. Poll that URL (`GET /api/status/<run-id>`) for progress; once `state` is `complete`, inspect its `result`. Only one run is active at a time; another request receives **409** with a busy message. Edited results include source evidence, a SHA-256 file digest, and `/api/review/<run-id>`; posting `{ "reviewed": true, "sha256": "<returned digest>" }` records review. Download is `GET /api/download/<run-id>`. Pending review returns 409; missing or changed output returns 404. Health check is `GET /api/health`.
+2. **API** — `POST /api/tailor` with `{ "jd": "...", "resume_b64": "...", "resume_name": "resume.docx" }` or `{ "jd": "...", "resume_id": "<saved id>" }` returns **202** and a `status` URL. A request with neither a file nor a saved id returns **400**. Poll that URL (`GET /api/status/<run-id>`) for progress; once `state` is `complete`, inspect its `result`. Only one run is active at a time; another request receives **409** with a busy message. Edited results include source evidence, a SHA-256 file digest, and `/api/review/<run-id>`; posting `{ "reviewed": true, "sha256": "<returned digest>" }` records review. Download is `GET /api/download/<run-id>`. Pending review returns 409; missing or changed output returns 404. `GET /api/library` lists saved bases. `GET /api/runs` lists prior runs and a download URL once review is recorded. Health check is `GET /api/health` and does not name a default resume.
 3. **One LLM call** — OpenAI-compatible Chat Completions (`resume_tailor/llm.py`). Today that is NVIDIA NIM (Nemotron 3 Ultra) via `https://integrate.api.nvidia.com/v1`. Any compatible provider works by changing `.env`.
 4. **Guardrails** — each recognized job keeps its employer, title, and dates; qualifications are frozen; changed passages are checked for altered quantities and unknown terms. Other changes require human review. Rejections save diagnostic text in that run's directory.
 5. **Word output** — the source `.docx` is cloned, edited, and checked in a temporary file before publication. Source/output aliases, including symlinks and hard links, are rejected. Browser and CLI results stay in separate `out/runs/<run-id>/` folders. Unchanged characters retain their original runs, preserving bold and italic formatting around edits. Review the resulting layout before use.
@@ -99,16 +103,17 @@ The score estimates how well the resume fits the job. Tailoring should surface
 relevant experience already supported by the base, and leave genuine gaps
 visible. A higher number is not a reason to invent experience.
 
-The lever that works is the base resume itself. It is the ceiling. If she has
-set SLOs, done GitOps, handled HIPAA data, add it to `resume/Sravya_base.docx`
-once; every future run can then surface it. Ten minutes making the base
-complete does more for scores than any model or prompt change, and it is true.
+The lever that works is the base resume itself. It is the ceiling. Experience
+that is missing from the uploaded file cannot be invented later. Add true
+experience to the Word file you upload; every later run that selects that saved
+base can then surface it. Ten minutes making the base complete does more for
+scores than any model or prompt change, and it is true.
 
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/getting-started/installation/) — installs Python 3.11+ if needed
 - An API key for an OpenAI-compatible chat model (NVIDIA `nvapi-…` or OpenAI `sk-…`)
-- The parent resume as a Word file in `resume/` (this repo ships `resume/Sravya_base.docx`)
+- Your own base resume as a Word `.docx` (upload it in the UI, or pass `--resume PATH` on the CLI). The repo does not include one.
 
 Install uv once:
 
@@ -155,7 +160,7 @@ Start the UI:
 uv run python -m resume_tailor --serve
 ```
 
-Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Paste a job description. Click **Tailor resume**. Wait (NVIDIA Ultra with thinking can take a couple of minutes), review the changed claims, then download the Word file from the page.
+Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Upload a `.docx` base resume (or pick a saved one). Paste a job description. Click **Tailor resume**. Wait (NVIDIA Ultra with thinking can take a couple of minutes), review the changed claims, then download the Word file from the page. Come back later and use **Previous jobs** to download a run you already reviewed.
 
 Safari: hard-refresh with **Cmd-Shift-R** if the page looks stale. The UI is a simple light form on purpose so Reader mode does not eat the submit button.
 
@@ -168,9 +173,11 @@ uv run python -m resume_tailor --serve --port 8787
 CLI (same backend, no browser):
 
 ```bash
-uv run python -m resume_tailor --jd path/to/jd.txt
-uv run python -m resume_tailor --jd -                 # paste JD, then Ctrl-D
+uv run python -m resume_tailor --jd path/to/jd.txt --resume path/to/resume.docx
+uv run python -m resume_tailor --jd - --resume path/to/resume.docx   # paste JD, then Ctrl-D
 ```
+
+`--resume` is required. Omitting it is an error, including when a `.docx` happens to sit in `resume/`.
 
 CLI success writes a **draft for factual review** and before/after evidence in
 the new run's `CHANGELOG.md`. The terminal prints the exact folder and draft
@@ -191,7 +198,7 @@ CLI run. `--out <directory>` changes the root for these run folders.
 - Employers, dates, titles, education, certifications, or metrics
 - Jobs that were not on the parent resume
 - Tools the resume does not already list
-- The parent Word file (`resume/Sravya_base.docx`)
+- The source Word file you passed in (the upload, the saved base, or `--resume`)
 
 Job and qualification checks depend on recognized document structure. Unknown
 terms may be reverted or rejected; changed quantities are blocked. Other
@@ -204,9 +211,8 @@ A poor-match JD is not a reason to overhaul the resume. The score should say so.
 ## Layout
 
 ```
-resume/Sravya_base.docx   parent Word resume — the source of truth, never overwritten
 resume_tailor/                Python package
-  server.py                   localhost UI + /api/tailor
+  server.py                   localhost UI + /api/tailor, library, and run list
   static/index.html           the website
   structure.py                .docx → typed blocks → markdown, and back
   llm.py                      OpenAI-compatible client, retry + truncation check
@@ -215,16 +221,16 @@ resume_tailor/                Python package
   guardrails.py               protected facts, rewrite limits, source review evidence
   docx_io.py                  ordered alignment, run-preserving Word writer
   files.py                    source path checks and atomic output publication
-out/                          gitignored outputs (Word, changelog, diff)
+out/                          gitignored local data
+  library/resumes/<id>/       uploaded base: original file, meta.json (name, time, id)
   runs/<run-id>/              source snapshot, outputs, report, review/progress status
-  latest.json                CLI run state and exact output path
+  latest.json                 CLI run state and exact output path
 .env.example                  env template
 ```
 
-`resume/Sravya_base.docx` is the current base, imported unchanged from the supplied
-`Sravya_base.docx` on 10 Sep 2026. The app and CLI read this Word file directly.
-The old Word and markdown copies were removed from `resume/` to avoid ambiguity;
-they remain recoverable from Git history. Tailored files belong in `out/`.
+No personal resume ships on `main`. The `sravya` branch still has the previous
+Sravya-specific snapshot, including `resume/Sravya_base.docx`. Tailored files
+and uploaded bases stay under `out/`, which is gitignored.
 
 ## Tests
 
@@ -256,22 +262,22 @@ uv pip install --python out/wheel-check/bin/python dist/*.whl
 out/wheel-check/bin/python tests/check_installed.py
 ```
 
-Run the installed app from the folder containing `resume/` and `.env`; its
-outputs belong to that working folder, while the UI ships inside the package.
+Run the installed app from the folder where you want `out/` and `.env` to live.
+The UI ships inside the package. Uploaded resumes and run history are created
+in that working folder the first time you tailor.
 
-## Updating the parent resume
+## Updating a base resume
 
-Replace `resume/Sravya_base.docx` with the new Word file, keeping that filename.
-The resolver prefers it over other Word files or legacy markdown in `resume/`.
-Keep old versions outside `resume/`, so they cannot become an accidental base.
-The CLI also supports an explicit `--resume PATH`.
+Upload the new Word file, or pass a new `--resume PATH`. The previous upload
+remains in `out/library/resumes/` until you delete that folder yourself. Saved
+bases are not a git history; they live only on the machine that uploaded them.
 
-`--reset` restores the selected source from its first-run `.original` backup;
-it does not undo a tailoring run. After an intentional base update, remove or
-refresh that backup before using reset so it cannot restore an older version.
+`--reset --resume PATH` restores that explicit file from its first-run
+`.original` backup. It does not undo a tailoring run, and it does not apply to
+a built-in sample because there isn't one. The browser `/api/reset` route
+refuses to guess a file.
 
-The repository intentionally includes the resume. Keep `.env`, credentials,
-and generated outputs out of commits.
+Keep `.env`, credentials, uploaded resumes, and generated outputs out of commits.
 
-`examples/sample_jd.txt` is written to mirror this resume closely, so it will
-always score well. Use a real posting when you want to judge the tool.
+`examples/sample_jd.txt` is only an example posting. Use a real posting when
+you want to judge the tool.
