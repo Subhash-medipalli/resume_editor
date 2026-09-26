@@ -6,18 +6,13 @@ import difflib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from resume_tailor.structure import DATE_SPAN_RE
+from resume_tailor.structure import CONTACT_MARKER_RE, DATE_SPAN_RE, JOB, SECTION, TITLE, from_markdown
 
 MONTH = (
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 )
-# An email address or a phone number — the details this guardrail exists to protect.
-CONTACT_MARKER_RE = re.compile(
-    r"[\w.+-]+@[\w-]+\.[\w.]+|\+?\d[\d ()./-]{7,}\d"
-)
 H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
-H3_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 
 
 @dataclass
@@ -46,7 +41,8 @@ def extract_facts(markdown: str) -> ProtectedFacts:
     text = _normalize(markdown)
     contact = _contact_block(text)
     h2 = tuple(_norm_heading(m.group(1)) for m in H2_RE.finditer(text))
-    job_headings = tuple(m.group(1).strip() for m in H3_RE.finditer(text))
+    blocks = from_markdown(text)
+    job_headings = tuple(block.text for block in blocks if block.kind == JOB)
     companies: list[str] = []
     titles: list[str] = []
     for heading in job_headings:
@@ -55,7 +51,7 @@ def extract_facts(markdown: str) -> ProtectedFacts:
             titles.append(title)
         if company:
             companies.append(company)
-    for title in _bold_titles_after_h3(text):
+    for title in (block.text for block in blocks if block.kind == TITLE):
         if title not in titles:
             titles.append(title)
     date_spans = tuple(_canon_span(m.group(0)) for m in DATE_SPAN_RE.finditer(text))
@@ -157,8 +153,10 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     if _named_history(base_n) != _named_history(out):
         report.violations.append("Named clients or projects changed. Preserve their names.")
     known = _known_credentials(base_n)
-    if any(_credential_claims(line) - known for line in out.splitlines()):
+    if any(_has_unknown_credential(line, known) for line in out.splitlines()):
         report.violations.append("A certification claim is not on the base resume.")
+    if _degree_levels(base_n) != _degree_levels(out):
+        report.violations.append("A degree claim changed. Preserve the candidate's degree levels throughout the resume.")
 
     report.changed_line_count = _changed_content_lines(base_n, out)
     report.review_items = review_edits(base_n, out)
@@ -196,12 +194,19 @@ def _check_bound_facts(base: str, out: str) -> list[str]:
     """Keep jobs in order with their own titles/dates, and freeze qualifications."""
     def jobs(text):
         records = []
-        for match in H3_RE.finditer(text):
-            body = re.split(r"^#{2,3}\s", text[match.end():], maxsplit=1, flags=re.MULTILINE)[0]
-            first = next((line.strip() for line in body.splitlines() if line.strip()), "")
-            role = first if re.fullmatch(r"\*\*(.+?)\*\*", first) else ""
-            records.append((_fact_text(match.group(1)), _fact_text(role),
-                            tuple(_canon_span(m.group()) for m in DATE_SPAN_RE.finditer(body))))
+        current = None
+        # Use the Word writer's parser: it also recognizes Company | dates
+        # without a markdown heading marker.
+        for block in from_markdown(text):
+            if block.kind == SECTION:
+                current = None
+            elif block.kind == JOB:
+                current = [_fact_text(block.text), "", []]
+                records.append(current)
+            elif current is not None:
+                if block.kind == TITLE:
+                    current[1] = _fact_text(block.text)
+                current[2].extend(_canon_span(m.group()) for m in DATE_SPAN_RE.finditer(block.text))
         return records
 
     def qualifications(text):
@@ -231,13 +236,20 @@ def _quantities(text: str) -> list[str]:
     units = (
         r"ms|seconds?|minutes?|hours?|days?|weeks?|months?|years?|percent|x|"
         r"[kmb]|thousand|million|billion|users?|customers?|clients?|records?|"
-        r"models?|engineers?|people|teams?|documents?|types?|requests?|events?|"
+        r"models?|engineers?|persons?|people|teams?|documents?|types?|requests?|events?|"
         r"services?|pipelines?|endpoints?|jobs?|tests?|deployments?|transactions?|"
         r"calls?|applications?|projects?|servers?|clusters?|regions?|databases?|"
         r"terabytes?|gigabytes?|petabytes?|TB|GB|PB"
     )
-    pattern = rf"[$€£]\s*{number}\s*(?:[kmb]\b|thousand\b|million\b|billion\b)?|{number}\s*\+?\s*(?:%|(?:{units})\b)|\b\d{{1,3}}(?:,\d{{3}})+\+?"
-    return [re.sub(r"[\s+]", "", m.group()).lower() for m in re.finditer(pattern, text, re.I)]
+    separator = r"[ \t]*(?:[-‐‑‒–—][ \t]*)?"
+    pattern = rf"[$€£]\s*{number}\s*(?:[kmb]\b|thousand\b|million\b|billion\b)?|{number}\s*\+?{separator}(?:%|(?:{units})\b)|\b\d{{1,3}}(?:,\d{{3}})+\+?"
+    quantities = []
+    for match in re.finditer(pattern, text, re.I):
+        value = re.sub(r"[\s+\-‐‑‒–—]", "", match.group()).lower()
+        # "2-hour" and "2 hours" express the same quantity; keep ms intact.
+        value = re.sub(r"([a-z]{2,})s$", r"\1", value)
+        quantities.append(re.sub(r"people$", "person", value))
+    return quantities
 
 
 def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
@@ -283,11 +295,11 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
         if tag == "equal":
             repaired.extend(out_lines[j1:j2])
             continue
-        claims = any(_credential_claims(out_lines[j]) - known for j in range(j1, j2))
+        claims = any(_has_unknown_credential(out_lines[j], known) for j in range(j1, j2))
         pairs = _pair_rewrites(base_lines, range(i1, i2), out_lines, range(j1, j2)) if numbers_moved or claims else {}
         for j in range(j1, j2):
             i = pairs.get(j)
-            if gained(j, i) or (i is not None and dropped(i, j)) or _credential_claims(out_lines[j]) - known:
+            if gained(j, i) or (i is not None and dropped(i, j)) or _has_unknown_credential(out_lines[j], known):
                 undone.append(out_lines[j].strip())
                 if i is not None:
                     repaired.append(base_lines[i])
@@ -320,10 +332,10 @@ def _pair_rewrites(base_lines, base_range, out_lines, out_range) -> dict[int, in
     return pairs
 
 
-_CERT_WORD_RE = re.compile(r"certified|certifications?", re.I)
 # Words that end a certification name: "AWS Certified Solutions Architect with Python".
 _NAME_STOP = frozenset("""a active an and are as at by current for from having in including is multiple of on or
-plus relevant that the to using valid various who with""".split())
+plus relevant that the to using valid various who with earned holds holding obtained completed achieved
+certified certification certifications""".split())
 _DASHES = {"-", "\u2013", "\u2014"}
 
 
@@ -336,35 +348,39 @@ def _name_words(tokens) -> set[str]:
             if part and part not in _NAME_STOP}
 
 
-def _credential_claims(line: str) -> set[str]:
-    """Words naming each certification claimed on `line`, plus "*" when one is claimed.
+def _credential_claims(line: str) -> list[frozenset[str]]:
+    """Separate word sets for each certification explicitly claimed on `line`.
 
     Reads "AWS Certified Solutions Architect", "PMP certification", "CKA-certified",
     "certified in Kubernetes", and "Certifications: AZ-900, CKA".
     ponytail: word rules, not a certification list. Match a curated list if these misfire.
     """
-    tokens = re.findall(r"[\w+#.-]+|[^\w\s]", line.strip().lstrip("-*#> "))
-    claims: set[str] = set()
+    # Keep internal dots in acronyms, but sentence-ending periods are boundaries.
+    tokens = re.findall(r"[\w+#-]+(?:\.[\w+#-]+)*|[^\w\s]", line.strip().lstrip("-*#> "))
+    claims: list[frozenset[str]] = []
     for index, token in enumerate(tokens):
         match = re.fullmatch(r"(?:([\w+#.]+)-)?(?:certified|certifications?)", token, re.I)
         if not match:
             continue
-        claims.add("*")
+        words = {"*"}
         if match.group(1):  # "CKA-certified": the prefix is the name
-            claims |= _name_words([match.group(1)])
+            claims.append(frozenset(words | _name_words([match.group(1)])))
             continue
         before: list[str] = []
         for position in range(index - 1, -1, -1):
             token = tokens[position]
             if token in _DASHES:
                 continue
-            if not _is_name_word(token) or len(before) == 3 or (position == 0 and token.istitle()):
-                break  # a sentence-initial verb ("Earned") names nothing
+            if not _is_name_word(token) or len(before) == 3:
+                break
             before.append(token)
-        claims |= _name_words(before)
+        words |= _name_words(before)
         rest = tokens[index + 1:]
         if rest[:1] == [":"]:  # "Certifications: AZ-900, CKA"
-            claims |= _name_words(word for word in rest[1:] if _is_name_word(word))
+            # Each list member must match a single real credential, too.
+            for name in re.split(r"[,;|]|\band\b", " ".join(rest[1:]), flags=re.I):
+                claims.append(frozenset(words | _name_words(
+                    token for token in name.split() if _is_name_word(token))))
             continue
         after: list[str] = []
         for token in rest[1:] if rest[:1] and rest[0].lower() == "in" else rest:  # "certified in Kubernetes"
@@ -373,20 +389,63 @@ def _credential_claims(line: str) -> set[str]:
             if not _is_name_word(token) or len(after) == 4:
                 break
             after.append(token)
-        claims |= _name_words(after)
+        claims.append(frozenset(words | _name_words(after)))
     return claims
 
 
-def _known_credentials(text: str) -> set[str]:
-    """Every word on the base's certification lines, so a real one can be named anywhere."""
-    known: set[str] = set()
+def _known_credentials(text: str) -> list[frozenset[str]]:
+    """Keep credential identities separate, so unrelated names cannot authorize upgrades."""
+    known: list[frozenset[str]] = []
     section = ""
     for line in text.splitlines():
         if line.startswith("## "):
             section = line
-        if _CERT_WORD_RE.search(line) or re.search(r"certif|licen[sc]", section, re.I):
-            known |= _name_words(re.findall(r"[\w+#.-]+", line)) | {"*"}
+            continue
+        if re.search(r"certif|licen[sc]", section, re.I):
+            for name in re.split(r"[,;|]|\band\b", line, flags=re.I):
+                words = _name_words(re.findall(r"[\w+#.-]+", name))
+                if words:
+                    known.append(frozenset(words | {"*"}))
+        else:
+            known.extend(_credential_claims(line))
     return known
+
+
+def _has_unknown_credential(line: str, known: list[frozenset[str]]) -> bool:
+    return any(not any(claim <= original for original in known)
+               for claim in _credential_claims(line))
+
+
+def _degree_levels(text: str) -> set[str]:
+    """Recognize degree claims anywhere without treating tools like MS SQL as degrees.
+
+    This checks common degree levels; qualification-section checks separately
+    preserve the exact institution, subject, and dates recorded there.
+    """
+    levels: set[str] = set()
+    patterns = {
+        "doctorate": r"\b(?:Ph\.?\s*D\.?|doctorate|doctoral\s+degree|doctor\s+of\s+\w+)(?!\w)",
+        "master": r"\b(?:M\.(?:Sc|S|A|Eng)\.?|MSc|MBA|MTech|MEng|master['’]?s?[ -]+(?:degree|holder|qualified|graduate|(?:of|in)\s+\w+))(?!\w)",
+        "bachelor": r"\b(?:B\.(?:Sc|S|A|Eng)\.?|BSc|BBA|BTech|BEng|bachelor['’]?s?[ -]+(?:degree|holder|qualified|graduate|(?:of|in)\s+\w+))(?!\w)",
+        "associate": r"\b(?:A\.(?:S|A)\.?|associate['’]?s?\s+(?:degree|of\s+\w+))(?!\w)",
+    }
+    for level, pattern in patterns.items():
+        if re.search(pattern, text, re.I):
+            levels.add(level)
+    section = ""
+    for line in text.splitlines():
+        if line.startswith("## "):
+            section = line
+        for abbreviation, level in (("MS|MA", "master"), ("BS|BA", "bachelor"), ("AS|AA", "associate")):
+            if re.search(r"educat|academic", section, re.I):
+                pattern = rf"\b(?:{abbreviation})\b"
+            else:
+                # Bare acronyms require an explicit educational phrase.
+                pattern = (rf"\b(?:{abbreviation})(?=\s+(?i:degree|in\b|of\b)|[- ](?i:qualified|educated|graduate)\b)"
+                           rf"|\b(?i:earned|holds?|completed|received)\s+(?i:an?\s+)?(?:{abbreviation})\b")
+            if re.search(pattern, line):
+                levels.add(level)
+    return levels
 
 
 def _scopes(text: str) -> dict[str, list[tuple[int, str]]]:
@@ -482,7 +541,7 @@ def _contact_block(text: str) -> str:
 def _last_identity_line(lines: list[str]) -> int:
     """Index of the last header line carrying a contact detail.
 
-    Everything up to it is identity (name, email, phone); anything after it is
+    Everything up to it is identity (name, email, phone, links); anything after it is
     usually a headline/tagline, which the model is allowed to retarget.
     """
     last = -1
@@ -551,19 +610,6 @@ def _split_job_heading(heading: str) -> tuple[str, str | None]:
     return heading.strip(), None
 
 
-def _bold_titles_after_h3(text: str) -> tuple[str, ...]:
-    found: list[str] = []
-    for match in H3_RE.finditer(text):
-        for line in text[match.end() :].splitlines():
-            if not line.strip():
-                continue
-            bold = re.fullmatch(r"\*\*(.+?)\*\*", line.strip())
-            if bold:
-                found.append(bold.group(1).strip())
-            break
-    return tuple(found)
-
-
 def _section_item_lines(text: str, heading_lname: str) -> tuple[str, ...]:
     pattern = re.compile(
         rf"^##\s+{re.escape(heading_lname)}\s*$",
@@ -585,14 +631,33 @@ def _section_item_lines(text: str, heading_lname: str) -> tuple[str, ...]:
 
 # Only capitalised names count: "project: migrated the data lake" names nothing.
 NAMED_HISTORY_RE = re.compile(
-    r"\b(?i:client|project)\s*(?:(?i:named|called)|:)\s*[\"'“]?"
-    r"([A-Z][A-Za-z0-9&.+-]*(?:\s+[A-Z][A-Za-z0-9&.+-]*){0,3})"
+    r"\b(?i:client|project)(?P<marker>[ \t]+(?i:named|called)[ \t]+|[ \t]*:[ \t]*|[ \t]+)[\"'“]?"
+    r"(?P<name>[A-Z][A-Za-z0-9&.+-]*(?:[ \t]+[A-Z][A-Za-z0-9&.+-]*){0,3})"
 )
+_HISTORY_DESCRIPTORS = frozenset("""api apis sdk sdks ui ux management planning delivery
+coordination lifecycle development architecture services support success""".split())
 
 
 def _named_history(text: str) -> set[str]:
     """Named clients/projects are work history, even when the JD mentions them."""
-    return {match.group(1).lower().strip() for match in NAMED_HISTORY_RE.finditer(text)}
+    # ponytail: a bounded name grammar, not entity recognition. Direct names
+    # need relationship context or a standalone label; "client OAuth integration"
+    # is a capability. Explicit named/called/colon labels always identify history.
+    names = set()
+    for match in NAMED_HISTORY_RE.finditer(text):
+        name = re.split(r"(?<=[a-z0-9])\.[ \t]+", match["name"], maxsplit=1)[0]
+        explicit = bool(re.search(r"named|called|:", match["marker"], re.I))
+        prefix = text[text.rfind("\n", 0, match.start()) + 1:match.start()].strip(" -*")
+        relationship = bool(re.search(r"\b(?:for|at|with|on)\s+(?:the\s+)?$", prefix + " ", re.I))
+        remaining = text[match.end():].split("\n", 1)[0].strip(" .:*\"'”")
+        standalone = not prefix and not remaining
+        if not explicit:
+            if name.split()[0].lower().rstrip(".") in _HISTORY_DESCRIPTORS:
+                continue
+            if not relationship and (not standalone or re.search(r"\b(?:SDKs?|APIs?)\b", name, re.I)):
+                continue
+        names.add(name.lower().strip().rstrip("."))
+    return names
 
 
 def _fuzzy_present(value: str, originals: tuple[str, ...]) -> bool:

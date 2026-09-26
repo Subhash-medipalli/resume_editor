@@ -51,6 +51,9 @@ SECTION_WORDS = frozenset(
 )
 CONTACT_MARKER_RE = re.compile(
     r"[\w.+-]+@[\w-]+\.[\w.]+|\+?\d[\d ()./-]{7,}\d"
+    r"|https?://[^\s<>]+|www\.[^\s<>]+|(?:linkedin\.com/in|github\.com)/[^\s<>]+"
+    r"|\b(?:linkedin|github|portfolio|website)\s*:",
+    re.IGNORECASE,
 )
 ENVIRONMENT_RE = re.compile(r"^Environment\s*:", re.IGNORECASE)
 
@@ -213,8 +216,11 @@ def from_markdown(markdown: str) -> list[Block]:
 
         # Strip stray markdown emphasis the model may add inside a line.
         text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        # Word identifies job headings by their visible text before considering
+        # bullet styling. Apply that same rule to bold/bulleted model output.
+        if kind != SECTION and (kind != NAME or blocks) and _is_job_heading(text):
+            kind = JOB
         blocks.append(Block(kind=kind, text=text))
         previous_kind = kind
 
     return blocks
-

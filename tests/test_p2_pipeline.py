@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from docx import Document
 
 from resume_tailor.cli import main
@@ -225,7 +226,7 @@ def test_optional_polish_provider_failure_keeps_first_pass(tmp_path):
 
 
 def test_polish_losing_one_of_many_keywords_keeps_the_first_pass(tmp_path):
-    """199/200 and 200/200 both round to 100%; the count decides."""
+    """199/200 and 200/200 both round to 100%; every matched term must remain."""
     source = tmp_path / "base.md"
     source.write_text(SAMPLE_RESUME)
     tools = [f"Tool{n}" for n in range(1, 201)]
@@ -271,3 +272,37 @@ def test_polish_that_drops_job_keywords_keeps_the_first_pass(tmp_path):
                            complete_fn=lambda *a, **k: next(replies), two_pass=True)
     assert result["ok"] and result["polish_error"] == "The polish removed job keywords."
     assert result["coverage"]["score"] == 100 and "Kafka" in Path(result["resume_path"]).read_text()
+
+
+@pytest.mark.parametrize("replacement", ["RabbitMQ", "RabbitMQ, Pulsar"],
+                         ids=["same-count-swap", "higher-count-with-loss"])
+def test_polish_cannot_trade_a_matched_keyword_for_new_keywords(tmp_path, replacement):
+    source = tmp_path / "base.md"
+    source.write_text(SAMPLE_RESUME)
+    first = lightly_tailored(SAMPLE_RESUME).replace("- Data: PostgreSQL, Redis", "- Data: PostgreSQL, Redis, Kafka")
+    polished = first.replace("Redis, Kafka", f"Redis, {replacement}")
+    replies = iter([pack_model_output(changelog=["Added Kafka"], match="good: first", resume=first),
+                    pack_model_output(changelog=["Polished skills"], match="good: polish", resume=polished)])
+    result = run_tailoring(job_description="Required: Python, Kafka, RabbitMQ, Pulsar",
+                           resume_path=source, out_dir=tmp_path / "run",
+                           api_key="fake", base_url="https://example.invalid", model="test",
+                           complete_fn=lambda *a, **k: next(replies), two_pass=True)
+    assert result["ok"] and result["polish_error"] == "The polish removed job keywords."
+    assert Path(result["resume_path"]).read_text() == first
+    assert result["coverage"]["matched"] == ["Kafka", "Python"]
+
+
+def test_polish_can_retain_keywords_with_different_case_and_add_more(tmp_path):
+    source = tmp_path / "base.md"
+    source.write_text(SAMPLE_RESUME)
+    first = lightly_tailored(SAMPLE_RESUME).replace("- Data: PostgreSQL, Redis", "- Data: PostgreSQL, Redis, Kafka")
+    polished = first.replace("Redis, Kafka", "Redis, kafka, RabbitMQ")
+    replies = iter([pack_model_output(changelog=["Added Kafka"], match="good: first", resume=first),
+                    pack_model_output(changelog=["Added RabbitMQ"], match="good: polish", resume=polished)])
+    result = run_tailoring(job_description="Required: Python, Kafka, RabbitMQ",
+                           resume_path=source, out_dir=tmp_path / "run",
+                           api_key="fake", base_url="https://example.invalid", model="test",
+                           complete_fn=lambda *a, **k: next(replies), two_pass=True)
+    assert result["ok"] and result["polish_error"] is None
+    assert Path(result["resume_path"]).read_text() == polished
+    assert result["coverage"]["score"] == 100

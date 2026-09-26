@@ -132,8 +132,8 @@ def run_tailoring(
                     polish_error = "; ".join(polished.report.violations)
                 elif polished.changed_by_checks:
                     polish_error = "The polish required automated corrections."
-                elif (len(keyword_coverage(keywords, polished.tailored)["matched"])
-                      < len(keyword_coverage(keywords, first.tailored)["matched"])):
+                elif (set(keyword_coverage(keywords, first.tailored)["matched"])
+                      - set(keyword_coverage(keywords, polished.tailored)["matched"])):
                     polish_error = "The polish removed job keywords."
                 else:
                     chosen = polished
