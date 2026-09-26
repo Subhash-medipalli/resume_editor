@@ -39,7 +39,7 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "ROOT", tmp_path)
     monkeypatch.setattr(server, "load_dotenv", lambda *a: None)
     monkeypatch.setattr(server, "complete", reply)
-    monkeypatch.setenv("OPENAI_API_KEY", "fake-no-network")
+    monkeypatch.setenv("LLM_API_KEY", "fake-no-network")
     (tmp_path / "resume").mkdir()
     (tmp_path / "resume/candidate.docx").write_bytes(resume_bytes())
     monkeypatch.chdir(tmp_path)

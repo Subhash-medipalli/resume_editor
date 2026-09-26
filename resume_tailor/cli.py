@@ -18,17 +18,15 @@ from resume_tailor.llm import (
 from resume_tailor.pipeline import run_tailoring
 
 _MISSING_KEY = """\
-OPENAI_API_KEY is not set.
+LLM_API_KEY is not set.
 
-This tool calls an OpenAI-compatible Chat Completions API.
+Put your model settings in a .env file in this folder (see .env.example):
 
-  export OPENAI_API_KEY=sk-...
-  # optional:
-  export OPENAI_BASE_URL=https://api.openai.com/v1
-  export OPENAI_MODEL=gpt-4o-mini
+  LLM_API_KEY=<your OpenRouter key>
+  LLM_BASE_URL=https://openrouter.ai/api/v1
+  LLM_MODEL=google/gemini-3.8-flash
 
-You can also put those in a .env file in the current directory
-(see .env.example). Never commit .env.
+Never commit .env.
 """
 
 
@@ -45,7 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("error: --jd is required (or pass --serve).\n")
         return 2
 
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    api_key = os.environ.get("LLM_API_KEY", "").strip()
     if not api_key:
         sys.stderr.write(_MISSING_KEY)
         return 2
@@ -59,10 +57,10 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out)
     base_url = (
         args.base_url
-        or os.environ.get("OPENAI_BASE_URL", "").strip()
+        or os.environ.get("LLM_BASE_URL", "").strip()
         or DEFAULT_BASE_URL
     )
-    model = args.model or os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_MODEL
+    model = args.model or os.environ.get("LLM_MODEL", "").strip() or DEFAULT_MODEL
 
     try:
         resume_path = _resolve_resume(args.resume)
@@ -146,12 +144,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=None,
-        help=f"Model name (default: OPENAI_MODEL or {DEFAULT_MODEL}).",
+        help=f"Model name (default: LLM_MODEL or {DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--base-url",
         default=None,
-        help=f"OpenAI-compatible API base URL (default: OPENAI_BASE_URL or {DEFAULT_BASE_URL}).",
+        help=f"Chat Completions API base URL (default: LLM_BASE_URL or {DEFAULT_BASE_URL}).",
     )
     return parser.parse_args(argv)
 

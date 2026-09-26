@@ -47,7 +47,7 @@ def test_cli_failure_points_to_its_own_run_and_preserves_prior_result(tmp_path, 
     source, jd, out = tmp_path / "base.md", tmp_path / "jd.txt", tmp_path / "out"
     source.write_text(SAMPLE_RESUME); jd.write_text("Python")
     raw = pack_model_output(changelog=["Edited summary"], match="good: partial alignment", resume=lightly_tailored(SAMPLE_RESUME))
-    monkeypatch.setenv("OPENAI_API_KEY", "fake")
+    monkeypatch.setenv("LLM_API_KEY", "fake")
     monkeypatch.setattr("resume_tailor.cli.complete", lambda *a, **k: raw)
     args = ["--jd", str(jd), "--resume", str(source), "--out", str(out)]
     assert main(args) == 0

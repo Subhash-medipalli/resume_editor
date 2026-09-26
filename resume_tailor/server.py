@@ -120,13 +120,13 @@ def _execute_run(
     load_dotenv(ROOT / ".env")
     import os
 
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    api_key = os.environ.get("LLM_API_KEY", "").strip()
     if not api_key:
-        return {"ok": False, "error": "OPENAI_API_KEY is missing. Put it in .env in the project folder."}
+        return {"ok": False, "error": "LLM_API_KEY is missing. Put it in .env in the project folder."}
     result = run_tailoring(
         job_description=job_description, resume_path=resume_path, out_dir=out_dir,
-        api_key=api_key, base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_BASE_URL,
-        model=os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_MODEL,
+        api_key=api_key, base_url=os.environ.get("LLM_BASE_URL", "").strip() or DEFAULT_BASE_URL,
+        model=os.environ.get("LLM_MODEL", "").strip() or DEFAULT_MODEL,
         complete_fn=complete,
         progress=lambda message: write_text(out_dir / "status.json", json.dumps({"state": "working", "message": message})),
         two_pass=two_pass,

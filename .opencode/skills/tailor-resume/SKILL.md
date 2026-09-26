@@ -22,5 +22,5 @@ When the user pastes a job description:
 If the run failed, say so and show the "Guardrail failures" section; do not hand
 over a file.
 
-If `OPENAI_API_KEY` is missing, tell them to put it in `.env` and do not invent a
+If `LLM_API_KEY` is missing, tell them to put it in `.env` and do not invent a
 tailored resume yourself.

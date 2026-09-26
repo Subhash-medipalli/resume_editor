@@ -13,18 +13,18 @@ def run_output(out, name):
 
 
 def test_missing_api_key_exits_2(monkeypatch, capsys, tmp_path):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
     code = main(["--jd", str(tmp_path / "nope.txt")])
     assert code == 2
     err = capsys.readouterr().err
-    assert "OPENAI_API_KEY" in err
-    assert "OPENAI_BASE_URL" in err
-    assert "OPENAI_MODEL" in err
+    assert "LLM_API_KEY" in err
+    assert "LLM_BASE_URL" in err
+    assert "LLM_MODEL" in err
 
 
 def test_cli_writes_new_file_and_leaves_source_untouched(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-not-real")
     resume = tmp_path / "resume.md"
     jd = tmp_path / "jd.txt"
     out = tmp_path / "out"
@@ -85,7 +85,7 @@ def test_cli_writes_new_file_and_leaves_source_untouched(monkeypatch, tmp_path, 
 
 
 def test_cli_reads_jd_from_stdin(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-not-real")
     resume = tmp_path / "resume.md"
     resume.write_text(SAMPLE_RESUME, encoding="utf-8")
     out = tmp_path / "out"
@@ -108,7 +108,7 @@ def test_cli_reads_jd_from_stdin(monkeypatch, tmp_path, capsys):
 
 
 def test_guardrail_failure_does_not_overwrite_source(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-not-real")
     resume = tmp_path / "resume.md"
     jd = tmp_path / "jd.txt"
     out = tmp_path / "out"
@@ -181,7 +181,7 @@ def test_source_named_like_latest_json_is_protected(tmp_path, monkeypatch, capsy
     source, jd = tmp_path / "latest.json", tmp_path / "jd.txt"
     source.write_text(SAMPLE_RESUME)
     jd.write_text("Python APIs")
-    monkeypatch.setenv("OPENAI_API_KEY", "fake")
+    monkeypatch.setenv("LLM_API_KEY", "fake")
     monkeypatch.setattr("resume_tailor.cli.complete", lambda *a, **k: pytest.fail("must protect source before calling model"))
     code = main(["--resume", str(source), "--jd", str(jd), "--out", str(tmp_path)])
     assert code == 1 and "protected source" in capsys.readouterr().err

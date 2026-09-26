@@ -8,8 +8,8 @@ def _no_real_provider_settings(monkeypatch):
     """Tests never read the developer's .env or provider environment."""
     monkeypatch.setattr("resume_tailor.cli.load_dotenv", lambda *_: None)
     monkeypatch.setattr("resume_tailor.server.load_dotenv", lambda *_: None)
-    for key in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_MAX_TOKENS",
-                "OPENAI_TIMEOUT", "OPENAI_TOTAL_TIMEOUT", "NVIDIA_ENABLE_THINKING"):
+    for key in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_MAX_TOKENS",
+                "LLM_TIMEOUT", "LLM_TOTAL_TIMEOUT", "NVIDIA_ENABLE_THINKING"):
         monkeypatch.delenv(key, raising=False)
 
 

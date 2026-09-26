@@ -1,4 +1,4 @@
-"""OpenAI-compatible chat completion (one call). Stdlib only."""
+"""One Chat Completions call, in the format OpenRouter, NVIDIA, and others share. Stdlib only."""
 
 from __future__ import annotations
 
@@ -20,8 +20,8 @@ from resume_tailor.prompt import SYSTEM_PROMPT, build_user_prompt
 from resume_tailor.guardrails import _changed_content_lines
 from resume_tailor.structure import from_markdown
 
-DEFAULT_BASE_URL = "https://api.openai.com/v1"
-DEFAULT_MODEL = "gpt-4o-mini"
+DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+DEFAULT_MODEL = "google/gemini-3.8-flash"
 # Seconds per attempt. Replies are not streamed, so a full resume arrives all at once.
 DEFAULT_TIMEOUT = 300
 # A two-minute generation should not be thrown away because the provider was busy.
@@ -114,29 +114,29 @@ def complete(
     url = base_url.rstrip("/") + "/chat/completions"
     nvidia = _is_nvidia(base_url, model)
     if timeout == DEFAULT_TIMEOUT:
-        timeout = os.environ.get("OPENAI_TIMEOUT", DEFAULT_TIMEOUT)
+        timeout = os.environ.get("LLM_TIMEOUT", DEFAULT_TIMEOUT)
     timeout = _positive_seconds(timeout)
-    total_timeout = _positive_seconds(os.environ.get("OPENAI_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT) if total_timeout is None else total_timeout)
+    total_timeout = _positive_seconds(os.environ.get("LLM_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT) if total_timeout is None else total_timeout)
     deadline = time.monotonic() + total_timeout
     progress = progress or (lambda message: None)
     body: dict = {
         "model": model,
         "messages": list(messages),
     }
-    # Newer models (gpt-5, o-series) reject custom temperature.
+    # Many hosted models reject a custom temperature; only NVIDIA gets one.
     if temperature is not None:
         body["temperature"] = temperature
     elif nvidia:
         body["temperature"] = 1
         body["top_p"] = 0.95
-    max_tokens = os.environ.get("OPENAI_MAX_TOKENS", "").strip()
+    max_tokens = os.environ.get("LLM_MAX_TOKENS", "").strip()
     if max_tokens:
         try:
             body["max_tokens"] = int(max_tokens)
         except ValueError as exc:
-            raise LLMError("OPENAI_MAX_TOKENS must be a positive integer.") from exc
+            raise LLMError("LLM_MAX_TOKENS must be a positive integer.") from exc
         if body["max_tokens"] <= 0:
-            raise LLMError("OPENAI_MAX_TOKENS must be a positive integer.")
+            raise LLMError("LLM_MAX_TOKENS must be a positive integer.")
     elif nvidia:
         body["max_tokens"] = 16384
     if nvidia:
@@ -195,8 +195,8 @@ def complete(
     if choice.get("finish_reason") == "length":
         raise LLMError(
             "The model hit its output limit and the resume is incomplete. "
-            "Raise OPENAI_MAX_TOKENS (currently "
-            f"{os.environ.get('OPENAI_MAX_TOKENS', 'unset')}) and try again."
+            "Raise LLM_MAX_TOKENS (currently "
+            f"{os.environ.get('LLM_MAX_TOKENS', 'unset')}) and try again."
         )
     if choice.get("finish_reason") in {"content_filter", "tool_calls", "function_call"}:
         raise LLMError("The provider did not return a complete resume answer.")
@@ -270,7 +270,7 @@ def tailor_resume(
         },
     ]
     deadline = time.monotonic() + _positive_seconds(
-        os.environ.get("OPENAI_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT)
+        os.environ.get("LLM_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT)
     )
     for attempt in range(2):
         remaining = deadline - time.monotonic()

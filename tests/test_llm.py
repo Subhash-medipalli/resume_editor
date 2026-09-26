@@ -150,8 +150,8 @@ def test_reasoning_only_or_unbalanced_output_is_never_an_answer(monkeypatch, con
         llm.complete([], api_key="fake")
 
 
-@pytest.mark.parametrize("setting,value", [("OPENAI_TIMEOUT", "oops"), ("OPENAI_TOTAL_TIMEOUT", "nan"),
-                                          ("OPENAI_MAX_TOKENS", "-1"), ("OPENAI_MAX_TOKENS", "many")])
+@pytest.mark.parametrize("setting,value", [("LLM_TIMEOUT", "oops"), ("LLM_TOTAL_TIMEOUT", "nan"),
+                                          ("LLM_MAX_TOKENS", "-1"), ("LLM_MAX_TOKENS", "many")])
 def test_invalid_provider_configuration_fails_before_request(monkeypatch, setting, value):
     monkeypatch.setenv(setting, value)
     monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: pytest.fail("invalid settings must not reach provider"))

@@ -13,7 +13,7 @@ uv sync
 cp .env.example .env
 ```
 
-Set the API key, base URL, and model in `.env` (see `.env.example`). Any OpenAI-compatible Chat Completions endpoint works; set the URL and model together when changing providers. Do not commit `.env`.
+Set the API key, base URL, and model in `.env` (see `.env.example`). Any service that speaks the standard Chat Completions format works (OpenRouter, NVIDIA, and others); set the URL and model together when changing providers. Do not commit `.env`.
 
 Put your Word resume in the `resume/` folder, or attach it in the app for a single run. Files in `resume/` are never committed, so a `git pull` never touches them.
 
