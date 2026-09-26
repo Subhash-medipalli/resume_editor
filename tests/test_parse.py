@@ -46,6 +46,7 @@ def test_system_prompt_encodes_hard_constraints():
         "education",
         "certifications",
         "do not add new numbers",
+        "write like the candidate",
         "changelog",
     ):
         assert phrase in text, f"system prompt missing {phrase!r}"

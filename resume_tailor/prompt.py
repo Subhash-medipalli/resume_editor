@@ -37,6 +37,10 @@ MATCH-FIRST RULES:
    against the complete job description, including the content you added. Assess
    responsibilities and requirements in context, not keyword count alone. Identify
    remaining gaps and do not inflate the score or score only the original resume.
+8. Write like the candidate, not like marketing copy: plain, specific, credible wording
+   a recruiter would believe. Keep existing phrasing that already fits the job and change
+   what the job needs. Avoid buzzwords such as "proven track record", "deep expertise",
+   "results-driven", "seasoned", "cutting-edge", "spearheaded", or "specialist".
 
 OUTPUT FORMAT — follow exactly. No extra commentary before or after:
 ===CHANGELOG===
