@@ -66,18 +66,32 @@ def test_existing_credentials_can_be_repeated_as_a_list():
     "MSc-qualified", "MBA-qualified", "MS in Computer Science graduate and",
     "Holds an MS and", "Associate degree holder and",
 ])
-def test_new_degree_level_in_summary_is_rejected(claim):
+def test_new_degree_level_in_summary_keeps_the_original_line(claim):
     draft = SAMPLE_RESUME.replace("Contract software engineer", f"{claim} contract software engineer")
-    _, report = apply_guardrails(SAMPLE_RESUME, draft)
-    assert not report.ok
-    assert any("degree claim" in violation for violation in report.violations)
+    fixed, report = apply_guardrails(SAMPLE_RESUME, draft)
+    assert report.ok, report.violations
+    assert f"{claim} contract" not in fixed and "Contract software engineer focused" in fixed
 
 
-def test_new_degree_in_experience_is_rejected():
+def test_new_degree_in_experience_keeps_the_original_line():
     draft = SAMPLE_RESUME.replace("- Built and operated Python services", "- Used PhD research to build Python services")
-    _, report = apply_guardrails(SAMPLE_RESUME, draft)
-    assert not report.ok
-    assert any("degree claim" in violation for violation in report.violations)
+    fixed, report = apply_guardrails(SAMPLE_RESUME, draft)
+    assert report.ok, report.violations
+    assert "PhD" not in fixed and "- Built and operated Python services" in fixed
+
+
+@pytest.mark.parametrize("text", ["Served as Scrum Master in sprint planning", "Scrum-Master in sprint planning"])
+def test_scrum_master_is_a_role_not_a_degree(text):
+    draft = SAMPLE_RESUME.replace("- Built and operated Python services", f"- {text} for Python services")
+    fixed, report = apply_guardrails(SAMPLE_RESUME, draft)
+    assert report.ok, report.violations
+    assert fixed == draft
+
+
+def test_verb_before_a_real_certification_is_not_part_of_its_name():
+    draft = SAMPLE_RESUME.replace("Contract software engineer", "Received AWS Certified Solutions Architect certification; contract software engineer")
+    fixed, report = apply_guardrails(SAMPLE_RESUME, draft)
+    assert report.ok and fixed == draft
 
 
 @pytest.mark.parametrize("claim", ["B.S.-qualified", "Bachelor of Science graduate and", "Bachelor's degree holder and", "BS in Computer Science graduate and"])

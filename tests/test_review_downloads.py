@@ -118,11 +118,12 @@ def test_download_cannot_assemble_a_new_certification_from_known_words(tailor):
     assert "Project Management Professional (PMP)" in text
 
 
-def test_new_degree_in_summary_has_no_download(tailor):
-    result, out_dir = tailor(lambda base: _add_skill(base).replace(
+def test_new_degree_in_summary_is_undone_in_the_download(tailor):
+    result, _ = tailor(lambda base: _add_skill(base).replace(
         "Python platform engineer.", "PhD-qualified Python platform engineer."
     ))
-    _assert_not_downloadable(result, out_dir)
+    text = _assert_repaired(result)
+    assert "PhD" not in text and "Python platform engineer." in text
 
 
 def test_download_restores_separate_contact_url(tailor):

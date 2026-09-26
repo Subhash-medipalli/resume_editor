@@ -273,7 +273,14 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
     out_scope = {number: scope for scope, items in edited.items() for number, _ in items}
     numbers_moved = any(added.values()) or any(lost.values())
     known = _known_credentials(base)
+    degrees = _degree_levels(base)
     base_lines, out_lines = base.splitlines(), out.splitlines()
+
+    def new_claim(j):
+        # Qualification sections stay frozen as a whole (see _check_bound_facts).
+        qualifications = re.search(r"educat|academic|certificat|credential|licen[sc]", out_scope.get(j + 1, ""))
+        return _has_unknown_credential(out_lines[j], known) or (
+            not qualifications and bool(_degree_levels(out_lines[j]) - degrees))
 
     def numbers(text):
         return Counter(_quantities(text))
@@ -295,11 +302,11 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
         if tag == "equal":
             repaired.extend(out_lines[j1:j2])
             continue
-        claims = any(_has_unknown_credential(out_lines[j], known) for j in range(j1, j2))
+        claims = any(new_claim(j) for j in range(j1, j2))
         pairs = _pair_rewrites(base_lines, range(i1, i2), out_lines, range(j1, j2)) if numbers_moved or claims else {}
         for j in range(j1, j2):
             i = pairs.get(j)
-            if gained(j, i) or (i is not None and dropped(i, j)) or _has_unknown_credential(out_lines[j], known):
+            if gained(j, i) or (i is not None and dropped(i, j)) or new_claim(j):
                 undone.append(out_lines[j].strip())
                 if i is not None:
                     repaired.append(base_lines[i])
@@ -339,6 +346,11 @@ certified certification certifications""".split())
 _DASHES = {"-", "\u2013", "\u2014"}
 
 
+def _is_verb(token: str) -> bool:
+    """"Received", "Maintained", "working": verbs end a certification name."""
+    return bool(re.search(r"(?:ed|ing)$", token, re.I))
+
+
 def _is_name_word(token: str) -> bool:
     return bool(re.match(r"[^\W\d]", token)) and token.lower() not in _NAME_STOP
 
@@ -371,7 +383,7 @@ def _credential_claims(line: str) -> list[frozenset[str]]:
             token = tokens[position]
             if token in _DASHES:
                 continue
-            if not _is_name_word(token) or len(before) == 3:
+            if not _is_name_word(token) or len(before) == 3 or _is_verb(token):
                 break
             before.append(token)
         words |= _name_words(before)
@@ -386,7 +398,7 @@ def _credential_claims(line: str) -> list[frozenset[str]]:
         for token in rest[1:] if rest[:1] and rest[0].lower() == "in" else rest:  # "certified in Kubernetes"
             if token in _DASHES:
                 continue  # "Solutions Architect – Professional" names the level too
-            if not _is_name_word(token) or len(after) == 4:
+            if not _is_name_word(token) or len(after) == 4 or _is_verb(token):
                 break
             after.append(token)
         claims.append(frozenset(words | _name_words(after)))
@@ -425,7 +437,7 @@ def _degree_levels(text: str) -> set[str]:
     levels: set[str] = set()
     patterns = {
         "doctorate": r"\b(?:Ph\.?\s*D\.?|doctorate|doctoral\s+degree|doctor\s+of\s+\w+)(?!\w)",
-        "master": r"\b(?:M\.(?:Sc|S|A|Eng)\.?|MSc|MBA|MTech|MEng|master['’]?s?[ -]+(?:degree|holder|qualified|graduate|(?:of|in)\s+\w+))(?!\w)",
+        "master": r"\b(?:M\.(?:Sc|S|A|Eng)\.?|MSc|MBA|MTech|MEng|(?<!scrum )(?<!scrum-)master['’]?s?[ -]+(?:degree|holder|qualified|graduate|(?:of|in)\s+\w+))(?!\w)",
         "bachelor": r"\b(?:B\.(?:Sc|S|A|Eng)\.?|BSc|BBA|BTech|BEng|bachelor['’]?s?[ -]+(?:degree|holder|qualified|graduate|(?:of|in)\s+\w+))(?!\w)",
         "associate": r"\b(?:A\.(?:S|A)\.?|associate['’]?s?\s+(?:degree|of\s+\w+))(?!\w)",
     }
