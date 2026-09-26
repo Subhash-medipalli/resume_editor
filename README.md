@@ -15,13 +15,13 @@ cp .env.example .env
 
 Set the API key, base URL, and model in `.env` (see `.env.example`). Any service that speaks the standard Chat Completions format works (OpenRouter, NVIDIA, and others); set the URL and model together when changing providers. Do not commit `.env`.
 
-Put your Word resume in the `resume/` folder, or attach it in the app for a single run. Files in `resume/` are never committed, so a `git pull` never touches them.
+Attach your Word resume in the app. Uploaded resumes are saved locally so you can select them again for later job descriptions. The browser always uses the resume you explicitly select. For CLI runs, you can also keep your own Word resume in the ignored `resume/` folder.
 
 ```bash
 uv run python -m resume_tailor --serve
 ```
 
-Open [the local app](http://127.0.0.1:8787), paste the job description, and choose **Tailor resume**. Progress and provider retries appear while the run is active. An optional second pass polishes the first result.
+Open [the local app](http://127.0.0.1:8787), select or attach a resume, paste the job description, and choose **Tailor resume**. Progress and provider retries appear while the run is active. An optional second pass polishes the first result. Recent jobs retain their own verified download links.
 
 ## What the checks do
 
@@ -58,9 +58,9 @@ Outputs are isolated under `out/runs/<run-id>/`. Each successful run contains a 
 
 ## HTTP API
 
-`POST /api/tailor` accepts JSON with `jd` and optional `two_pass`, `resume_b64`, and `resume_name`. It returns 202 with a run-specific status URL. Poll `GET /api/status/<run-id>` until `state` is `complete`, then inspect `result.ok` and `result.download`.
+`POST /api/tailor` accepts JSON with `jd`, optional `two_pass`, and either a new upload (`resume_b64` and `resume_name`) or a saved `resume_id`. It returns 202 with a run-specific status URL and the saved resume ID. Poll `GET /api/status/<run-id>` until `state` is `complete`, then inspect `result.ok` and `result.download`.
 
-`GET /api/download/<run-id>` serves only that run's verified artifact. Its digest is rechecked before download. Failed runs and modified files cannot download. `GET /api/health` names the default resume. Only one run is active at a time; overlapping submissions receive 409.
+`GET /api/library` lists saved resumes and `GET /api/runs` lists recent jobs. Uploads are stored under `out/library/resumes/`; each job has a separate source snapshot under `out/runs/`. `GET /api/download/<run-id>` serves only that run's verified artifact. Its digest is rechecked before download. Failed runs and modified files cannot download. `GET /api/health` reports availability without selecting a default resume. Only one run is active at a time; overlapping submissions receive 409.
 
 Requests must target the local server, and browser requests must use its own origin. Job descriptions are limited to 60,000 characters, request bodies to 8 MB, and attached Word files to 5 MB compressed and 25 MB expanded. Provider attempts share a bounded deadline. A timed-out provider may still finish remotely; late responses cannot publish a result.
 

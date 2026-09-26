@@ -32,6 +32,16 @@
     .btn.big { padding:18px 28px; font-size:17px; }
     input[type=file] { display:none; }
     .fileline { margin-top:12px; font-size:14px; color:var(--muted); }
+    .history h2 { font-size:13px; margin:0 0 8px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+    .history ul + h2 { margin-top:18px; }
+    .history ul { list-style:none; padding:0; margin:0; }
+    .history li { display:flex; justify-content:space-between; gap:12px; align-items:baseline; padding:6px 0; border-top:1px solid var(--line); font-size:14px; }
+    .history li:first-child { border-top:0; }
+    .history .label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+    .history .meta { color:var(--muted); flex:none; }
+    .history button, .history a { color:var(--blue); font-weight:600; background:none; border:0; padding:0; cursor:pointer; font:inherit; text-decoration:none; flex:none; }
+    .history button:disabled { opacity:.55; cursor:wait; }
+    .history .empty { color:var(--muted); font-style:italic; border:0; }
     /* working */
     .working { text-align:center; padding:48px 24px; }
     .spinner { width:44px; height:44px; border:4px solid var(--line); border-top-color:var(--blue); border-radius:50%; margin:0 auto 20px; animation:spin .9s linear infinite; }
@@ -69,8 +79,15 @@
 <div class="wrap">
   <header>
     <h1>Resume tailor</h1>
-    <div class="base">Base resume: <b id="baseName">…</b><button type="button" id="pick">change</button></div>
+    <div class="base">Base resume: <b id="baseName">none — upload required</b><button type="button" id="pick">upload</button></div>
   </header>
+
+  <section class="card history" aria-label="Saved resumes and previous jobs">
+    <h2>Saved resumes</h2>
+    <ul id="resumes"></ul>
+    <h2>Previous jobs</h2>
+    <ul id="runs"></ul>
+  </section>
 
   <!-- 1. enter -->
   <section id="enter" class="card">
@@ -132,9 +149,101 @@
 <script>
   const $ = (id) => document.getElementById(id);
   const show = (id) => { for (const s of ["enter","working","result"]) $(s).hidden = s !== id; window.scrollTo({top:0, behavior:"smooth"}); };
-  let attached = null, tick = null, running = false, readingFile = false;
+  let attached = null, tick = null, running = false, readingFile = false, selectedId = null, libraryItems = [];
 
-  fetch("/api/health").then(r => r.json()).then(d => { if (!attached) $("baseName").textContent = d.base || "none yet, attach your .docx"; }).catch(() => {});
+  function loadHistory() {
+    Promise.all([
+      fetch("/api/library").then((r) => r.json()),
+      fetch("/api/runs").then((r) => r.json()),
+    ]).then(([library, runs]) => {
+      libraryItems = library.resumes || [];
+      renderResumes(libraryItems);
+      renderRuns(runs.runs || []);
+    }).catch(() => {});
+  }
+
+  function renderResumes(items) {
+    const ul = $("resumes");
+    ul.textContent = "";
+    if (!items.length) {
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "None yet. Upload a .docx to get started.";
+      ul.appendChild(li);
+      return;
+    }
+    for (const item of items) {
+      const li = document.createElement("li");
+      const label = document.createElement("span");
+      label.className = "label";
+      const when = (item.saved_at || "").replace("T", " ").replace("+00:00", " UTC");
+      label.textContent = (item.original_name || item.filename || "resume.docx") + (when ? " · " + when : "");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = selectedId === item.id && !attached ? "selected" : "use";
+      btn.disabled = running || readingFile;
+      btn.onclick = () => selectSaved(item);
+      li.appendChild(label);
+      li.appendChild(btn);
+      ul.appendChild(li);
+    }
+  }
+
+  function renderRuns(items) {
+    const ul = $("runs");
+    ul.textContent = "";
+    if (!items.length) {
+      const li = document.createElement("li");
+      li.className = "empty";
+      li.textContent = "No jobs yet.";
+      ul.appendChild(li);
+      return;
+    }
+    for (const run of items) {
+      const li = document.createElement("li");
+      const label = document.createElement("span");
+      label.className = "label";
+      const when = (run.created_at || "").replace("T", " ").replace("+00:00", " UTC");
+      label.textContent = [when, run.source_name, run.jd_preview].filter(Boolean).join(" · ");
+      li.appendChild(label);
+      if (run.download && /^\/api\/download\/[0-9a-f]{32}$/.test(run.download)) {
+        const link = document.createElement("a");
+        link.href = run.download;
+        link.textContent = "Download";
+        li.appendChild(link);
+      } else {
+        const note = document.createElement("span");
+        note.className = "meta";
+        note.textContent = run.state === "working" ? "working" : run.ok === false ? "failed" : "unavailable";
+        li.appendChild(note);
+      }
+      ul.appendChild(li);
+    }
+  }
+
+  function selectSaved(item) {
+    if (running || readingFile) return;
+    selectedId = item.id;
+    attached = null;
+    $("file").value = "";
+    const name = item.original_name || item.filename || "saved resume";
+    $("baseName").textContent = name;
+    $("fileline").textContent = "Using saved resume " + name + ".";
+    $("fileline").hidden = false;
+    $("err").hidden = true;
+    show("enter");
+    renderResumes(libraryItems);
+  }
+
+  function updateControls() {
+    const busy = running || readingFile;
+    $("go").disabled = busy;
+    $("pick").disabled = busy;
+    $("twoPass").disabled = busy;
+    for (const button of $("resumes").querySelectorAll("button")) button.disabled = busy;
+  }
+
+  loadHistory();
 
   $("pick").onclick = () => $("file").click();
   $("file").addEventListener("change", async (e) => {
@@ -143,15 +252,17 @@
     show("enter");
     if (!f.name.toLowerCase().endsWith(".docx")) { $("err").textContent = "Please choose a .docx file."; $("err").hidden = false; e.target.value = ""; return; }
     if (f.size > 5000000) { $("err").textContent = "Please choose a Word file smaller than 5 MB."; $("err").hidden = false; e.target.value = ""; return; }
-    readingFile = true; $("go").disabled = true; $("pick").disabled = true;
+    readingFile = true; updateControls();
     try {
       const b = new Uint8Array(await f.arrayBuffer()); let s = "";
       for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+      selectedId = null;
       attached = { name: f.name, b64: btoa(s) };
-      $("baseName").textContent = f.name; $("fileline").textContent = "Using " + f.name + " for tailoring. Simple single-column Word layouts are supported."; $("fileline").hidden = false;
+      $("baseName").textContent = f.name; $("fileline").textContent = "Using " + f.name + ". It will be saved for reuse when tailoring starts. Simple single-column Word layouts are supported."; $("fileline").hidden = false;
+      renderResumes(libraryItems);
       $("err").hidden = true;
     } catch (e) { $("err").textContent = "Could not read the Word file. Please choose it again."; $("err").hidden = false; }
-    finally { readingFile = false; $("go").disabled = false; $("pick").disabled = false; }
+    finally { readingFile = false; updateControls(); }
   });
 
   try { $("jd").value = localStorage.getItem("jd") || ""; } catch {}
@@ -195,19 +306,29 @@
     const jd = $("jd").value.trim();
     if (!jd) { $("err").textContent = "Paste a job description first."; $("err").hidden = false; return; }
     if (jd.length > 60000) { $("err").textContent = "Job description is too long (maximum 60,000 characters)."; $("err").hidden = false; return; }
-    running = true; $("pick").disabled = true; $("twoPass").disabled = true;
+    if (!attached && !selectedId) { $("err").textContent = "Upload a .docx base resume, or choose a saved one."; $("err").hidden = false; return; }
+    running = true; updateControls();
     $("dl").hidden = true; $("dl").removeAttribute("href");
     $("err").hidden = true; $("timer").textContent = "0:00"; show("working");
     $("progress").textContent = "Preparing the source resume…";
     const t0 = Date.now(); clearInterval(tick);
     tick = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("timer").textContent = `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`; }, 500);
-    const payload = { jd, two_pass: $("twoPass").checked }; if (attached) { payload.resume_b64 = attached.b64; payload.resume_name = attached.name; }
+    const payload = { jd, two_pass: $("twoPass").checked };
+    if (attached) { payload.resume_b64 = attached.b64; payload.resume_name = attached.name; }
+    else payload.resume_id = selectedId;
     let data;
     try {
       const res = await fetch("/api/tailor", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(payload) });
       data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || res.statusText);
       if (res.status === 202) {
+        if (typeof data.resume_id === "string" && /^[0-9a-f]{32}$/.test(data.resume_id)) {
+          selectedId = data.resume_id;
+          attached = null;
+          $("file").value = "";
+          $("fileline").textContent = "Using saved resume " + $("baseName").textContent + ".";
+        }
+        loadHistory();
         const statusUrl = data.status;
         while (true) {
           const statusResponse = await fetch(statusUrl);
@@ -222,7 +343,7 @@
     } catch (e) {
       clearInterval(tick); show("enter"); $("err").textContent = e.message; $("err").hidden = false; return;
     } finally {
-      running = false; $("pick").disabled = false; $("twoPass").disabled = false;
+      running = false; updateControls(); loadHistory();
     }
     clearInterval(tick);
     const sc = data.match_score; const cls = !data.ok ? "blocked" : sc == null ? "" : sc >= 75 ? "good" : sc >= 50 ? "mid" : "poor";

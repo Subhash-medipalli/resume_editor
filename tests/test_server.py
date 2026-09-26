@@ -28,6 +28,10 @@ def resume_bytes(name="Sample Candidate"):
     return stream.getvalue()
 
 
+def with_resume(payload, name="Sample Candidate", filename="sample.docx"):
+    return {**payload, "resume_name": filename, "resume_b64": base64.b64encode(resume_bytes(name)).decode()}
+
+
 def reply(messages, **kwargs):
     base = messages[1]["content"].split("\n## Resume to tailor ", 1)[1].split("\n\n", 1)[1]
     return pack_model_output(changelog=["Reworded one bullet"], match="SCORE: 70\npartial: Test reply",
@@ -40,8 +44,6 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "load_dotenv", lambda *a: None)
     monkeypatch.setattr(server, "complete", reply)
     monkeypatch.setenv("LLM_API_KEY", "fake-no-network")
-    (tmp_path / "resume").mkdir()
-    (tmp_path / "resume/candidate.docx").write_bytes(resume_bytes())
     monkeypatch.chdir(tmp_path)
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
     worker = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -60,6 +62,9 @@ def api(tmp_path, monkeypatch):
         finally:
             conn.close()
     def request(method, path, payload=None):
+        if (method == "POST" and path == "/api/tailor" and isinstance(payload, dict)
+                and not {"resume_b64", "resume_id"} & payload.keys()):
+            payload = with_resume(payload)
         status, body = raw_request(method, path, payload)
         if status == 202:
             deadline = time.monotonic() + 10
@@ -128,16 +133,19 @@ def test_busy_request_is_explicit_and_same_name_uploads_remain_separate(api, mon
     assert first_result[1]["run_id"] != second_result[1]["run_id"]
 
 
-def test_default_source_is_snapshotted_before_model_work(api, monkeypatch, tmp_path):
-    source = tmp_path / "resume/candidate.docx"
+def test_run_snapshot_ignores_later_edits_to_the_saved_base(api, monkeypatch, tmp_path):
     def change_source(messages, **kwargs):
-        source.write_bytes(resume_bytes("Updated Candidate"))
+        saved = list((tmp_path / "out/library/resumes").glob("*/*.docx"))
+        assert len(saved) == 1
+        saved[0].write_bytes(resume_bytes("Updated Candidate"))
         return reply(messages, **kwargs)
     monkeypatch.setattr(server, "complete", change_source)
     _, result = api("POST", "/api/tailor", {"jd": "Python"})
     _, data = api("GET", result["download"])
     assert Document(io.BytesIO(data)).paragraphs[0].text == "Sample Candidate"
-    assert Document(source).paragraphs[0].text == "Updated Candidate"
+    saved = next((tmp_path / "out/library/resumes").glob("*/*.docx"))
+    assert Document(saved).paragraphs[0].text == "Updated Candidate"
+    assert not (tmp_path / "resume").exists()
 
 
 @pytest.mark.parametrize("failure", ["guardrail", "verification"])
@@ -182,7 +190,7 @@ def test_async_status_shows_provider_progress_and_completion(api, monkeypatch):
         assert release.wait(5)
         return reply(messages, **kwargs)
     monkeypatch.setattr(server, "complete", with_progress)
-    status, started = api.raw("POST", "/api/tailor", {"jd": "Python"})
+    status, started = api.raw("POST", "/api/tailor", with_resume({"jd": "Python"}))
     try:
         assert status == 202
         assert waiting.wait(5)
@@ -263,10 +271,14 @@ def test_stale_working_run_reports_interruption(api, tmp_path):
 
 
 def test_unicode_result_filename_downloads(api, tmp_path):
-    source = tmp_path / "resume/candidate.docx"
-    source.rename(source.with_name("Candidate — résumé.docx"))
     _, result = api("POST", "/api/tailor", {"jd": "Python"})
-    assert result["ok"] and result["resume_path"].endswith("/Candidate — résumé.docx")
+    run_dir = tmp_path / "out/runs" / result["run_id"]
+    manifest_path = run_dir / "result.json"
+    manifest = json.loads(manifest_path.read_text())
+    name = "Candidate — résumé.docx"
+    (run_dir / manifest["file"]).rename(run_dir / name)
+    manifest["file"] = name
+    manifest_path.write_text(json.dumps(manifest))
     status, document = api("GET", result["download"])
     assert status == 200 and Document(io.BytesIO(document)).paragraphs[0].text == "Sample Candidate"
 
@@ -296,3 +308,105 @@ def test_model_echo_never_creates_a_successful_download(api, monkeypatch, tmp_pa
     assert len(calls) <= 2
     assert not list((tmp_path / "out/runs").glob("*/result.json"))
     assert not list((tmp_path / "out/runs").glob("*/*.docx"))
+
+
+def test_web_requires_explicit_base_even_when_local_resume_exists(api, tmp_path):
+    local = tmp_path / "resume/candidate.docx"
+    local.parent.mkdir()
+    local.write_bytes(resume_bytes())
+    status, health = api("GET", "/api/health")
+    assert status == 200 and health["base"] is None
+    status, result = api.raw("POST", "/api/tailor", {"jd": "Python"})
+    assert status == 400 and "base resume" in result["error"]
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("resume_id", ["a" * 32, "../secrets", ["not", "text"]])
+def test_unknown_or_invalid_saved_resume_is_rejected_before_run(api, tmp_path, resume_id):
+    status, result = api.raw("POST", "/api/tailor", {"jd": "Python", "resume_id": resume_id})
+    assert status == 400 and not result["ok"]
+    assert not (tmp_path / "out").exists()
+    assert not server._TAILOR_LOCK.locked()
+
+
+def test_saved_resume_reuse_and_history_keep_immediate_downloads(api, tmp_path):
+    status, first = api("POST", "/api/tailor", with_resume(
+        {"jd": "Python services"}, name="Ada Candidate", filename="Ada Resume.docx",
+    ))
+    assert status == 200 and first["ok"] and first["resume_id"]
+    status, library = api("GET", "/api/library")
+    assert status == 200 and len(library["resumes"]) == 1
+    saved = library["resumes"][0]
+    assert saved["id"] == first["resume_id"] and saved["original_name"] == "Ada Resume.docx"
+    folder = tmp_path / "out/library/resumes" / saved["id"]
+    original = (folder / saved["filename"]).read_bytes()
+    status, second = api("POST", "/api/tailor", {"jd": "Java services", "resume_id": saved["id"]})
+    assert status == 200 and second["ok"] and second["resume_id"] == saved["id"]
+    assert first["run_id"] != second["run_id"]
+    assert (folder / saved["filename"]).read_bytes() == original
+    assert len(api("GET", "/api/library")[1]["resumes"]) == 1
+    status, history = api("GET", "/api/runs")
+    assert status == 200
+    by_id = {item["id"]: item for item in history["runs"]}
+    for result, jd in [(first, "Python services"), (second, "Java services")]:
+        run = by_id[result["run_id"]]
+        assert run["ok"] is True and run["state"] == "complete"
+        assert run["source_name"] == "Ada Resume.docx" and run["jd_preview"] == jd
+        assert run["resume_id"] == saved["id"] and run["download"] == result["download"]
+        status, data = api("GET", run["download"])
+        assert status == 200 and Document(io.BytesIO(data)).paragraphs[0].text == "Ada Candidate"
+
+
+def test_saved_resume_selection_keeps_optional_polish(api, monkeypatch):
+    _, first = api("POST", "/api/tailor", {"jd": "Python"})
+    calls = []
+    def track_reply(messages, **kwargs):
+        calls.append(messages)
+        return reply(messages, **kwargs)
+    monkeypatch.setattr(server, "complete", track_reply)
+    status, result = api("POST", "/api/tailor", {
+        "jd": "Python", "resume_id": first["resume_id"], "two_pass": True,
+    })
+    assert status == 200 and result["ok"] and result["download"]
+    assert result["resume_id"] == first["resume_id"] and len(calls) == 2
+
+
+def test_library_selection_validates_saved_word_bytes(api, monkeypatch, tmp_path):
+    _, first = api("POST", "/api/tailor", {"jd": "Python"})
+    saved = next((tmp_path / "out/library/resumes" / first["resume_id"]).glob("*.docx"))
+    saved.write_bytes(b"PK" + b"x" * 150)
+    monkeypatch.setattr(server, "complete", lambda *a, **k: pytest.fail("Invalid saved Word file reached model"))
+    status, result = api.raw("POST", "/api/tailor", {"jd": "Python", "resume_id": first["resume_id"]})
+    assert status == 400 and not result["ok"]
+    assert len(list((tmp_path / "out/runs").iterdir())) == 1
+
+
+def test_history_download_links_still_verify_the_requested_artifact(api, tmp_path):
+    _, result = api("POST", "/api/tailor", {"jd": "Python"})
+    _, history = api("GET", "/api/runs")
+    link = history["runs"][0]["download"]
+    assert link == result["download"]
+    run_dir = tmp_path / "out/runs" / result["run_id"]
+    next(run_dir.glob("*.docx")).write_bytes(b"changed after verification")
+    assert api("GET", link)[0] == 404
+
+
+def test_history_handles_interrupted_malformed_and_non_directory_entries(api, tmp_path):
+    root = tmp_path / "out/runs"
+    for run_id, state in [("a" * 32, "working"), ("b" * 32, []), ("c" * 32, {})]:
+        folder = root / run_id
+        folder.mkdir(parents=True)
+        (folder / "status.json").write_text(json.dumps({"state": state}))
+    (root / ("d" * 32)).write_text("not a directory")
+    (root / ("e" * 32)).symlink_to(root / ("a" * 32), target_is_directory=True)
+    status, history = api("GET", "/api/runs")
+    assert status == 200
+    by_id = {item["id"]: item for item in history["runs"]}
+    assert set(by_id) == {"a" * 32, "b" * 32, "c" * 32}
+    assert by_id["a" * 32]["state"] == "complete" and by_id["a" * 32]["ok"] is False
+    assert by_id["b" * 32]["state"] == by_id["c" * 32]["state"] == "unknown"
+
+
+def test_removed_review_and_reset_endpoints_stay_removed(api):
+    assert api("POST", "/api/review/" + "a" * 32, {"reviewed": True})[0] == 404
+    assert api("POST", "/api/reset", {})[0] == 404
