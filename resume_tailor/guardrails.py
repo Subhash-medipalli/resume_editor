@@ -13,6 +13,7 @@ MONTH = (
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 )
 H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+QUALIFICATION_HEADING_RE = re.compile(r"educat|academic|certificat|credential|licen[sc]", re.I)
 
 
 @dataclass
@@ -73,7 +74,7 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     """Protect identity, work history, qualifications, and numbers.
 
     Skills and wording may change freely. A line that changes a number or claims
-    a new certification gets its original back instead of failing the whole run.
+    a new degree/certification gets its original back instead of failing the run.
     """
     report = GuardrailReport(ok=True)
     base_n = _normalize(base)
@@ -90,8 +91,8 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     out, undone = _repair_lines(base_n, out)
     for line in undone:
         report.warnings.append(
-            "Kept your original line because the edit changed a number or claimed a "
-            f"certification: “{line[:70]}…”"
+            "Kept your original line because the edit changed a number or added a "
+            f"degree/certification claim: “{line[:70]}…”"
         )
 
     out_facts = extract_facts(out)
@@ -212,7 +213,7 @@ def _check_bound_facts(base: str, out: str) -> list[str]:
     def qualifications(text):
         sections = []
         for match in H2_RE.finditer(text):
-            if re.search(r"educat|academic|certificat|credential|licen[sc]", match.group(1), re.I):
+            if QUALIFICATION_HEADING_RE.search(match.group(1)):
                 body = re.split(r"^##\s", text[match.end():], maxsplit=1, flags=re.MULTILINE)[0]
                 sections.append(_fact_text(body))
         return sections
@@ -253,7 +254,7 @@ def _quantities(text: str) -> list[str]:
 
 
 def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
-    """Undo edits that add or drop a number in a role, or claim a new certification.
+    """Undo edits that change a role's numbers or add a degree/certification claim.
 
     Each edited line is paired with the original it most resembles. A flagged
     edit gets that original back, an added line is dropped, and a deleted
@@ -275,12 +276,20 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
     known = _known_credentials(base)
     degrees = _degree_levels(base)
     base_lines, out_lines = base.splitlines(), out.splitlines()
+    qualification_lines = set()
+    in_qualifications = False
+    for j, line in enumerate(out_lines):
+        heading = H2_RE.fullmatch(line)
+        if heading:
+            in_qualifications = bool(QUALIFICATION_HEADING_RE.search(heading.group(1)))
+        if in_qualifications:
+            qualification_lines.add(j)
 
     def new_claim(j):
-        # Qualification sections stay frozen as a whole (see _check_bound_facts).
-        qualifications = re.search(r"educat|academic|certificat|credential|licen[sc]", out_scope.get(j + 1, ""))
+        # Only an enclosing H2 section freezes qualifications. A job's employer
+        # may contain words such as Education or Licensing without being one.
         return _has_unknown_credential(out_lines[j], known) or (
-            not qualifications and bool(_degree_levels(out_lines[j]) - degrees))
+            j not in qualification_lines and bool(_degree_levels(out_lines[j]) - degrees))
 
     def numbers(text):
         return Counter(_quantities(text))
@@ -342,13 +351,8 @@ def _pair_rewrites(base_lines, base_range, out_lines, out_range) -> dict[int, in
 # Words that end a certification name: "AWS Certified Solutions Architect with Python".
 _NAME_STOP = frozenset("""a active an and are as at by current for from having in including is multiple of on or
 plus relevant that the to using valid various who with earned holds holding obtained completed achieved
-certified certification certifications""".split())
+received maintained working certified certification certifications""".split())
 _DASHES = {"-", "\u2013", "\u2014"}
-
-
-def _is_verb(token: str) -> bool:
-    """"Received", "Maintained", "working": verbs end a certification name."""
-    return bool(re.search(r"(?:ed|ing)$", token, re.I))
 
 
 def _is_name_word(token: str) -> bool:
@@ -383,7 +387,7 @@ def _credential_claims(line: str) -> list[frozenset[str]]:
             token = tokens[position]
             if token in _DASHES:
                 continue
-            if not _is_name_word(token) or len(before) == 3 or _is_verb(token):
+            if not _is_name_word(token) or len(before) == 3:
                 break
             before.append(token)
         words |= _name_words(before)
@@ -398,7 +402,7 @@ def _credential_claims(line: str) -> list[frozenset[str]]:
         for token in rest[1:] if rest[:1] and rest[0].lower() == "in" else rest:  # "certified in Kubernetes"
             if token in _DASHES:
                 continue  # "Solutions Architect – Professional" names the level too
-            if not _is_name_word(token) or len(after) == 4 or _is_verb(token):
+            if not _is_name_word(token) or len(after) == 4:
                 break
             after.append(token)
         claims.append(frozenset(words | _name_words(after)))
@@ -434,10 +438,13 @@ def _degree_levels(text: str) -> set[str]:
     This checks common degree levels; qualification-section checks separately
     preserve the exact institution, subject, and dates recorded there.
     """
+    # Normalize this role only for claim detection, preserving the actual resume
+    # text and recognizing Word's nonbreaking spaces and typographic hyphens.
+    text = re.sub(r"\bscrum[\s\-‐‑‒–—]+master\b", "ScrumMaster", text, flags=re.I)
     levels: set[str] = set()
     patterns = {
         "doctorate": r"\b(?:Ph\.?\s*D\.?|doctorate|doctoral\s+degree|doctor\s+of\s+\w+)(?!\w)",
-        "master": r"\b(?:M\.(?:Sc|S|A|Eng)\.?|MSc|MBA|MTech|MEng|(?<!scrum )(?<!scrum-)master['’]?s?[ -]+(?:degree|holder|qualified|graduate|(?:of|in)\s+\w+))(?!\w)",
+        "master": r"\b(?:M\.(?:Sc|S|A|Eng)\.?|MSc|MBA|MTech|MEng|master['’]?s?[ -]+(?:degree|holder|qualified|graduate|(?:of|in)\s+\w+))(?!\w)",
         "bachelor": r"\b(?:B\.(?:Sc|S|A|Eng)\.?|BSc|BBA|BTech|BEng|bachelor['’]?s?[ -]+(?:degree|holder|qualified|graduate|(?:of|in)\s+\w+))(?!\w)",
         "associate": r"\b(?:A\.(?:S|A)\.?|associate['’]?s?\s+(?:degree|of\s+\w+))(?!\w)",
     }

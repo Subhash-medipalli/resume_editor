@@ -17,7 +17,8 @@ from tests.helpers import pack_model_output
 def tailor(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "ROOT", tmp_path)
 
-    def run(edit, *, certifications=(), polish=None, jd="Python Kubernetes"):
+    def run(edit, *, certifications=(), employer="Example Systems", education_section="Education",
+            polish=None, jd="Python Kubernetes"):
         document = Document()
         for text, style in [
             ("Synthetic Candidate", None),
@@ -28,12 +29,12 @@ def tailor(tmp_path, monkeypatch):
             ("Technical Skills", "Heading 1"),
             ("Tools: Python", "List Bullet"),
             ("Professional Experience", "Heading 1"),
-            ("Example Systems | Jan 2022 – Present", None),
+            (f"{employer} | Jan 2022 – Present", None),
             ("Data Engineer", None),
             ("Led a 5-person team delivering Python services.", "List Bullet"),
             ("Reduced processing to a 2-hour window.", "List Bullet"),
             ("Built Python pipelines for client Northstar.", "List Bullet"),
-            ("Education", "Heading 1"),
+            (education_section, "Heading 1"),
             ("B.S. Computing — Example University, 2021", None),
         ]:
             document.add_paragraph(text, style)
@@ -124,6 +125,61 @@ def test_new_degree_in_summary_is_undone_in_the_download(tailor):
     ))
     text = _assert_repaired(result)
     assert "PhD" not in text and "Python platform engineer." in text
+
+
+@pytest.mark.parametrize("employer", ["Example Education Systems", "Example Academic Services", "Example Licensing Labs"])
+def test_employer_name_does_not_disable_degree_repair(tailor, employer):
+    original = "Built Python pipelines for client Northstar."
+    result, _ = tailor(
+        lambda base: _add_skill(base).replace(original, "Used PhD research to build Python pipelines for client Northstar."),
+        employer=employer,
+    )
+    text = _assert_repaired(result)
+    assert employer in text and original in text and "PhD" not in text
+
+
+@pytest.mark.parametrize("claim", ["Certified Advanced Cloud Engineer.", "Certified Learning Specialist."])
+def test_download_rejects_unknown_certification_adjectives(tailor, claim):
+    result, _ = tailor(
+        lambda base: _add_skill(base).replace("Python platform engineer.", claim),
+        certifications=["AWS Certified Solutions Architect – Associate"],
+    )
+    text = _assert_repaired(result)
+    assert claim not in text and "Python platform engineer." in text
+
+
+@pytest.mark.parametrize("certification,claim", [
+    ("Certified Advanced Cloud Engineer", "Received Certified Advanced Cloud Engineer."),
+    ("Certified Learning Specialist", "Maintained Certified Learning Specialist."),
+    ("Certified Advanced Cloud Engineer", "Certified Advanced Cloud Engineer working with Python."),
+])
+def test_download_keeps_known_certifications_with_surrounding_verbs(tailor, certification, claim):
+    result, _ = tailor(
+        lambda base: _add_skill(base).replace("Python platform engineer.", claim),
+        certifications=[certification],
+    )
+    text = _download_text(result)
+    assert claim in text and "Kubernetes" in text
+    assert result["match_score"] == 95 and not result["warnings"]
+
+
+@pytest.mark.parametrize("separator", [" ", "  ", "\u00a0", "\t", "-", "\u2011"])
+def test_download_keeps_scrum_master_role_with_spacing_variants(tailor, separator):
+    claim = f"Served as Scrum{separator}Master in sprint planning."
+    result, _ = tailor(lambda base: _add_skill(base).replace("Python platform engineer.", claim))
+    text = _download_text(result)
+    assert " ".join(claim.split()) in " ".join(text.split())
+    assert "Kubernetes" in text
+    assert result["match_score"] == 95 and not result["warnings"]
+
+
+@pytest.mark.parametrize("section", ["Education", "Academic Qualifications", "Professional Credentials"])
+def test_degree_changes_inside_qualification_sections_have_no_download(tailor, section):
+    result, out_dir = tailor(
+        lambda base: _add_skill(base).replace("B.S. Computing", "PhD in Computing"),
+        education_section=section,
+    )
+    _assert_not_downloadable(result, out_dir)
 
 
 def test_download_restores_separate_contact_url(tailor):

@@ -26,7 +26,7 @@ Open [the local app](http://127.0.0.1:8787), paste the job description, and choo
 ## What the checks do
 
 - **Skills and wording change freely.** Missing job keywords are sent to the model as editing targets. There is no edit budget.
-- **Work history is protected.** A changed employer, job title, date, degree, certification, or named client/project fails the run with no download, because those are what employment and background checks verify.
+- **Work history is protected.** Changed employers, job titles, dates, named clients/projects, or qualification-section contents fail validation with no download. A new degree claim in editable prose restores that line while retaining other valid edits; employer names containing words such as Education do not change this behavior.
 - **Numbers stay with their role.** If an edit adds, changes, or drops a detected quantity (including "5-person" teams and "2-hour" windows), that line keeps its original wording and the run continues. "11+ years" and "over 11 years" count as the same claim.
 - **Certifications cannot be assembled from unrelated credentials.** A detected new certification claim keeps its original line. Each claimed credential must match one original credential; mentioning a real certification elsewhere, such as in the summary, is fine.
 - **Contact details**, including separate LinkedIn, GitHub, and website links, are restored from the original when altered.

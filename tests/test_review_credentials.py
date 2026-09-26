@@ -88,10 +88,51 @@ def test_scrum_master_is_a_role_not_a_degree(text):
     assert fixed == draft
 
 
-def test_verb_before_a_real_certification_is_not_part_of_its_name():
-    draft = SAMPLE_RESUME.replace("Contract software engineer", "Received AWS Certified Solutions Architect certification; contract software engineer")
+@pytest.mark.parametrize("claim", [
+    "Received AWS Certified Solutions Architect certification;",
+    "Maintained AWS Certified Solutions Architect certification;",
+    "AWS Certified Solutions Architect working on Python services;",
+])
+def test_verbs_around_a_real_certification_are_not_part_of_its_name(claim):
+    draft = SAMPLE_RESUME.replace("Contract software engineer", f"{claim} contract software engineer")
     fixed, report = apply_guardrails(SAMPLE_RESUME, draft)
     assert report.ok and fixed == draft
+
+
+@pytest.mark.parametrize("claim", [
+    "AWS Certified Advanced Networking – Specialty",
+    "Certified Advanced ScrumMaster",
+    "Advanced Networking certification",
+])
+def test_ed_and_ing_words_do_not_hide_new_certification_names(claim):
+    draft = SAMPLE_RESUME.replace("Contract software engineer", f"{claim} and contract software engineer")
+    fixed, report = apply_guardrails(SAMPLE_RESUME, draft)
+    assert report.ok, report.violations
+    assert fixed == SAMPLE_RESUME
+    assert report.warnings
+
+
+def test_learning_does_not_hide_a_different_credential():
+    base = SAMPLE_RESUME.replace("AWS Certified Solutions Architect – Associate", "AWS Certified Machine Learning – Specialty")
+    draft = base.replace("Contract software engineer", "AWS Certified Machine Learning Engineer – Associate and contract software engineer")
+    fixed, report = apply_guardrails(base, draft)
+    assert report.ok, report.violations
+    assert fixed == base
+    assert report.warnings
+
+
+@pytest.mark.parametrize("credential", [
+    "AWS Certified Advanced Networking – Specialty",
+    "Certified Advanced ScrumMaster",
+    "AWS Certified Machine Learning Engineer – Associate",
+])
+def test_existing_credentials_with_ed_and_ing_words_remain_allowed(credential):
+    base = SAMPLE_RESUME.replace("AWS Certified Solutions Architect – Associate", credential)
+    draft = base.replace("Contract software engineer", f"Received {credential} and contract software engineer")
+    fixed, report = apply_guardrails(base, draft)
+    assert report.ok, report.violations
+    assert fixed == draft
+    assert not report.warnings
 
 
 @pytest.mark.parametrize("claim", ["B.S.-qualified", "Bachelor of Science graduate and", "Bachelor's degree holder and", "BS in Computer Science graduate and"])
