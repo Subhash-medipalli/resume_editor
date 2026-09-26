@@ -3,41 +3,27 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import io
+import re
 import threading
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
-from resume_tailor.cli import (
-    _ensure_original_backup,
-    _original_path,
-    _render_changelog,
-    _load_source_text,
-    _resolve_resume,
-    _write_outputs,
-    verify_output,
-)
-from resume_tailor.guardrails import (
-    apply_guardrails,
-    check_changelog_matches_diff,
-    unified_diff,
-)
-from resume_tailor.llm import (
-    DEFAULT_BASE_URL,
-    DEFAULT_MODEL,
-    LLMError,
-    complete,
-    load_dotenv,
-    tailor_resume,
-)
+from resume_tailor.cli import _resolve_resume
+from resume_tailor.files import new_run_dir, write_text
+from resume_tailor.pipeline import run_tailoring, validate_job_description
+from resume_tailor.llm import DEFAULT_BASE_URL, DEFAULT_MODEL, complete, load_dotenv
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path.cwd()
 
-# One tailoring run at a time: every run writes the same files in out/, so
-# concurrent requests would interleave and /api/download could serve a
-# half-written document.
+# ponytail: one active provider run for this local app; return busy instead of
+# silently queuing. Use a bounded queue if concurrent users become necessary.
 _TAILOR_LOCK = threading.Lock()
+_ACTIVE_RUN_ID: str | None = None
 
 # A job description is text. Anything this large is not one.
 MAX_BODY_BYTES = 8_000_000
@@ -45,11 +31,10 @@ MAX_BODY_BYTES = 8_000_000
 # Only requests addressed to this machine are served. Without this check any
 # web page the user visits can drive the tool, and a DNS-rebinding page can
 # read the resume back out of it.
-ALLOWED_HOSTS = {"localhost", "127.0.0.1", "[::1]", "::1"}
+ALLOWED_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
-# The file the most recent successful run produced. /api/download used to serve
-# a hardcoded name, so it could hand back a previous job's resume.
-_LAST_DOWNLOAD: Path | None = None
+def _new_run_dir() -> Path:
+    return new_run_dir(ROOT / "out")
 
 
 def _json_bytes(payload: dict, status: int = 200) -> tuple[int, bytes, str]:
@@ -58,15 +43,18 @@ def _json_bytes(payload: dict, status: int = 200) -> tuple[int, bytes, str]:
 
 
 
-def _save_attached_resume(payload: dict) -> Path | None:
+def _save_attached_resume(payload: dict, run_dir: Path) -> Path | None:
     """Optional base64 .docx from the browser. None = use the in-repo resume."""
     import base64
-    import re
-
-    b64 = str(payload.get("resume_b64") or "").strip()
+    b64 = payload.get("resume_b64", "")
+    if not isinstance(b64, str):
+        raise ValueError("resume_b64 must be a base64 string.")
+    b64 = b64.strip()
     if not b64:
         return None
-    name = str(payload.get("resume_name") or "attached.docx")
+    name = payload.get("resume_name") or "attached.docx"
+    if not isinstance(name, str):
+        raise ValueError("resume_name must be a string.")
     name = Path(name).name
     if not name.lower().endswith(".docx"):
         raise ValueError("Attached resume must be a .docx file.")
@@ -74,130 +62,116 @@ def _save_attached_resume(payload: dict) -> Path | None:
     if "," in b64 and b64.lower().startswith("data:"):
         b64 = b64.split(",", 1)[1]
     try:
-        data = base64.b64decode(b64, validate=False)
+        data = base64.b64decode(b64, validate=True)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"Could not decode attached resume: {exc}") from exc
     if len(data) < 100 or data[:2] != b"PK":
         raise ValueError("Attached file does not look like a .docx (zip) file.")
     if len(data) > 5_000_000:
         raise ValueError("Attached resume is too large (max 5 MB).")
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            members = archive.infolist()
+            if len(members) > 1000 or sum(item.file_size for item in members) > 25_000_000:
+                raise ValueError("The Word document expands beyond the supported size (25 MB).")
+            if not {"[Content_Types].xml", "word/document.xml"}.issubset(archive.namelist()):
+                raise ValueError("Attached file is not a Word .docx document.")
+        from docx import Document
+        Document(io.BytesIO(data))
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("Could not read this Word document. Save it as a valid .docx file.") from exc
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name) or "attached.docx"
-    dest_dir = ROOT / "out" / "uploads"
+    dest_dir = run_dir / "source"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / safe
-    dest.write_bytes(data)
+    with dest.open("xb") as stream:
+        stream.write(data)
     return dest
 
 
-def _run_tailor(job_description: str, resume_path: Path | None = None) -> dict:
-    with _TAILOR_LOCK:
-        return _run_tailor_locked(job_description, resume_path)
+def _run_tailor(
+    job_description: str,
+    resume_path: Path | None = None,
+    *,
+    run_dir: Path | None = None,
+    two_pass: bool = False,
+) -> dict:
+    run_dir = run_dir or _new_run_dir()
+    source = resume_path or _resolve_resume(None)
+    if source.suffix.lower() != ".docx":
+        raise ValueError("The browser requires a Word .docx base resume.")
+    snapshot = run_dir / "source" / source.name
+    if source.resolve() != snapshot.resolve():
+        snapshot.parent.mkdir(parents=True, exist_ok=True)
+        with snapshot.open("xb") as stream:
+            stream.write(source.read_bytes())
+    return _execute_run(job_description, snapshot, run_dir, two_pass=two_pass)
 
 
-def _run_tailor_locked(job_description: str, resume_path: Path | None = None) -> dict:
+def _execute_run(
+    job_description: str,
+    resume_path: Path,
+    out_dir: Path,
+    *,
+    two_pass: bool = False,
+) -> dict:
     load_dotenv(ROOT / ".env")
     import os
 
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
-        return {
-            "ok": False,
-            "error": "OPENAI_API_KEY is missing. Put it in .env in the project folder.",
-        }
-    jd = job_description.strip()
-    if not jd:
-        return {"ok": False, "error": "Job description is empty."}
+        return {"ok": False, "error": "OPENAI_API_KEY is missing. Put it in .env in the project folder."}
+    result = run_tailoring(
+        job_description=job_description, resume_path=resume_path, out_dir=out_dir,
+        api_key=api_key, base_url=os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_BASE_URL,
+        model=os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_MODEL,
+        complete_fn=complete,
+        progress=lambda message: write_text(out_dir / "status.json", json.dumps({"state": "working", "message": message})),
+        two_pass=two_pass,
+    )
+    if result["ok"]:
+        result["download"] = f"/api/download/{out_dir.name}"
+    return result
 
-    if resume_path is None:
-        resume_path = _resolve_resume(None)
-        _ensure_original_backup(resume_path)
-    elif not resume_path.is_file():
-        return {"ok": False, "error": f"Attached resume not found: {resume_path}"}
-    original = _load_source_text(resume_path)
-    base_url = os.environ.get("OPENAI_BASE_URL", "").strip() or DEFAULT_BASE_URL
-    model = os.environ.get("OPENAI_MODEL", "").strip() or DEFAULT_MODEL
+
+def _finish_run(
+    jd: str,
+    attached: Path | None,
+    run_dir: Path,
+    two_pass: bool = False,
+) -> None:
+    global _ACTIVE_RUN_ID
     try:
-        result = tailor_resume(
-            resume_markdown=original,
-            job_description=jd,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            complete_fn=complete,
-        )
-    except LLMError as exc:
-        return {"ok": False, "error": str(exc)}
-
-    tailored, report = apply_guardrails(original, result.resume_markdown)
-    contradictions = check_changelog_matches_diff(
-        result.changelog, report.changed_line_count
-    )
-    if contradictions:
-        report.violations.extend(contradictions)
-        report.ok = False
-    diff_text = unified_diff(original, tailored, fromfile=str(resume_path), tofile=str(resume_path))
-    out_dir = ROOT / "out"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # The untouched model reply: the only way to tell a model that echoed the
-    # resume from a pipeline that dropped its edits.
-    (out_dir / "model.raw.txt").write_text(result.raw, encoding="utf-8")
-    written = None
-    if report.ok:
-        written = _write_outputs(
-            tailored=tailored,
-            resume_path=resume_path,
-            out_dir=out_dir,
-        )
-        drift = verify_output(written, tailored)
-        if drift:
-            report.violations.extend(drift)
-            report.ok = False
-    else:
-        (out_dir / "resume.rejected.md").write_text(tailored, encoding="utf-8")
-    changelog = _render_changelog(
-        match_line=result.match_line,
-        match_score=result.match_score,
-        changelog=result.changelog,
-        report=report,
-        changed_line_count=report.changed_line_count,
-        resume_path=written or resume_path,
-        wrote_in_place=False,
-        score_inferred=result.score_inferred,
-    )
-    (out_dir / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
-    (out_dir / "resume.diff").write_text(diff_text or "(no changes)\n", encoding="utf-8")
-    global _LAST_DOWNLOAD
-    download = None
-    if report.ok and written is not None and written.suffix.lower() == ".docx":
-        _LAST_DOWNLOAD = written
-        download = "/api/download"
-    else:
-        _LAST_DOWNLOAD = None
-    return {
-        "ok": report.ok,
-        "changelog": changelog,
-        "diff": diff_text,
-        "violations": report.violations,
-        "resume_path": str(written or resume_path),
-        "match_score": result.match_score,
-        "match_line": result.match_line,
-        "score_inferred": result.score_inferred,
-        "changed_lines": report.changed_line_count,
-        "changes": result.changelog,
-        "warnings": report.warnings,
-        "download": download,
-    }
+        try:
+            result = _run_tailor(jd, attached, run_dir=run_dir, two_pass=two_pass)
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc), "download": None, "run_id": run_dir.name}
+        write_text(run_dir / "status.json", json.dumps({"state": "complete", "result": result}))
+    finally:
+        _ACTIVE_RUN_ID = None
+        _TAILOR_LOCK.release()
 
 
-def _run_reset() -> dict:
-    resume_path = _resolve_resume(None)
-    original = _original_path(resume_path)
-    if not original.is_file():
-        return {"ok": False, "error": f"No backup at {original}."}
-    import shutil
-
-    shutil.copyfile(original, resume_path)
-    return {"ok": True, "message": f"Restored {resume_path} from {original}"}
+def _read_result(run_id: str) -> tuple[dict, bytes]:
+    if not re.fullmatch(r"[0-9a-f]{32}", run_id):
+        raise ValueError("Unknown run.")
+    run_dir = ROOT / "out" / "runs" / run_id
+    manifest = run_dir / "result.json"
+    result = json.loads(manifest.read_text(encoding="utf-8"))
+    if not isinstance(result, dict):
+        raise ValueError("Invalid result manifest.")
+    name = result.get("file", "")
+    if not isinstance(name, str) or Path(name).name != name or not name.endswith(".docx"):
+        raise ValueError("Invalid result file.")
+    dest = run_dir / name
+    if dest.is_symlink() or dest.resolve().parent != run_dir.resolve():
+        raise ValueError("Result file moved outside its run.")
+    data = dest.read_bytes()
+    if hashlib.sha256(data).hexdigest() != result.get("sha256"):
+        raise ValueError("The result changed after verification. Run the tailor again.")
+    return result, data
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -205,15 +179,27 @@ class Handler(BaseHTTPRequestHandler):
         return
 
     def _host_allowed(self) -> bool:
-        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
-        return host in ALLOWED_HOSTS or host == ""
+        authority = self.headers.get("Host", "")
+        try:
+            parsed = urlparse("//" + authority)
+            return (
+                len(self.headers.get_all("Host", [])) == 1
+                and parsed.hostname in ALLOWED_HOSTS
+                and (parsed.port or 80) == self.server.server_port
+                and not (parsed.username or parsed.password or parsed.path or parsed.query or parsed.fragment)
+            )
+        except ValueError:
+            return False
 
     def _reject_foreign_host(self) -> bool:
-        if self._host_allowed():
+        origin = self.headers.get("Origin")
+        if (self._host_allowed()
+                and (not origin or origin.lower() == "http://" + self.headers["Host"].lower())
+                and self.headers.get("Sec-Fetch-Site") != "cross-site"):
             return False
         self._send(
             403,
-            b'{"error":"this server only answers requests addressed to localhost"}',
+            b'{"error":"this server only accepts requests from its own localhost origin"}',
             "application/json",
         )
         return True
@@ -223,6 +209,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
 
@@ -241,19 +229,34 @@ class Handler(BaseHTTPRequestHandler):
             status, body, ctype = _json_bytes({"ok": True, "base": base.name if base else None})
             self._send(status, body, ctype)
             return
-        if path == "/api/download":
-            dest = _LAST_DOWNLOAD
-            if dest is None or not dest.is_file():
+        if path.startswith("/api/status/"):
+            run_id = path.removeprefix("/api/status/")
+            if not re.fullmatch(r"[0-9a-f]{32}", run_id):
+                self._send(404, b'{"error":"unknown run"}', "application/json")
+                return
+            try:
+                status = json.loads((ROOT / "out/runs" / run_id / "status.json").read_text(encoding="utf-8"))
+                if status.get("state") == "working" and run_id != _ACTIVE_RUN_ID:
+                    status = {"state": "complete", "result": {
+                        "ok": False, "download": None, "run_id": run_id,
+                        "error": "This run was interrupted. Start a new tailoring run.",
+                    }}
+                data = json.dumps(status).encode("utf-8")
+            except (OSError, ValueError):
+                self._send(404, b'{"error":"unknown run"}', "application/json")
+                return
+            self._send(200, data, "application/json")
+            return
+        if path.startswith("/api/download/"):
+            try:
+                result, data = _read_result(path.removeprefix("/api/download/"))
+            except (OSError, ValueError):
                 self._send(
                     404,
-                    b'{"error":"no tailored Word file from this session yet"}',
+                    b'{"error":"no verified Word file for this run"}',
                     "application/json",
                 )
                 return
-            if not dest.is_file():
-                self._send(404, b'{"error":"no tailored Word file yet"}', "application/json")
-                return
-            data = dest.read_bytes()
             self.send_response(200)
             self.send_header(
                 "Content-Type",
@@ -261,15 +264,18 @@ class Handler(BaseHTTPRequestHandler):
             )
             self.send_header(
                 "Content-Disposition",
-                f'attachment; filename="{dest.name}"',
+                "attachment; filename=\"resume.docx\"; filename*=UTF-8''" + quote(result["file"], safe=""),
             )
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
             self.wfile.write(data)
             return
         self._send(404, b'{"error":"not found"}', "application/json")
 
     def do_POST(self) -> None:  # noqa: N802
+        global _ACTIVE_RUN_ID
         if self._reject_foreign_host():
             return
         path = urlparse(self.path).path
@@ -289,41 +295,45 @@ class Handler(BaseHTTPRequestHandler):
                 "application/json",
             )
             return
-        origin = self.headers.get("Origin")
-        if origin:
-            host = urlparse(origin).hostname or ""
-            if host.lower() not in ALLOWED_HOSTS:
-                self._send(
-                    403, b'{"error":"cross-origin request refused"}', "application/json"
-                )
-                return
         raw = self.rfile.read(length) if length else b"{}"
         try:
             payload = json.loads(raw.decode("utf-8") or "{}")
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             self._send(400, b'{"error":"invalid JSON"}', "application/json")
+            return
+        if not isinstance(payload, dict):
+            self._send(400, b'{"error":"JSON body must be an object"}', "application/json")
             return
         try:
             if path == "/api/tailor":
                 try:
-                    attached = _save_attached_resume(payload)
+                    validate_job_description(payload.get("jd"))
+                    two_pass = payload.get("two_pass", False)
+                    if not isinstance(two_pass, bool):
+                        raise ValueError("two_pass must be true or false.")
                 except ValueError as exc:
-                    result = {"ok": False, "error": str(exc)}
-                    _, body, ctype = _json_bytes(result, 400)
-                    self._send(400, body, ctype)
+                    self._send(*_json_bytes({"ok": False, "error": str(exc)}, 400))
                     return
-                result = _run_tailor(str(payload.get("jd") or ""), attached)
-                status = 200 if "error" not in result or result.get("ok") else 400
-                if result.get("error") and not result.get("ok"):
-                    status = 400
-                _, body, ctype = _json_bytes(result, status)
-                self._send(status, body, ctype)
-                return
-            if path == "/api/reset":
-                result = _run_reset()
-                status = 200 if result.get("ok") else 400
-                _, body, ctype = _json_bytes(result, status)
-                self._send(status, body, ctype)
+                if not _TAILOR_LOCK.acquire(blocking=False):
+                    self._send(*_json_bytes({"ok": False, "error": "Another resume is being processed. Wait for it to finish, then run again."}, 409))
+                    return
+                try:
+                    run_dir = _new_run_dir()
+                    attached = _save_attached_resume(payload, run_dir)
+                    _ACTIVE_RUN_ID = run_dir.name
+                    write_text(run_dir / "status.json", json.dumps({"state": "working", "message": "Preparing the source resume"}))
+                    worker = threading.Thread(
+                        target=_finish_run,
+                        args=(payload["jd"], attached, run_dir, two_pass),
+                        daemon=True,
+                    )
+                    worker.start()
+                except Exception as exc:
+                    _ACTIVE_RUN_ID = None
+                    _TAILOR_LOCK.release()
+                    self._send(*_json_bytes({"ok": False, "error": str(exc)}, 400))
+                    return
+                self._send(*_json_bytes({"ok": True, "run_id": run_dir.name, "status": f"/api/status/{run_dir.name}"}, 202))
                 return
         except Exception as exc:  # noqa: BLE001
             _, body, ctype = _json_bytes({"ok": False, "error": str(exc)}, 500)
@@ -333,6 +343,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8787) -> None:
+    if host not in {"127.0.0.1", "localhost"}:
+        raise ValueError("This local app must bind to 127.0.0.1 or localhost.")
     load_dotenv(ROOT / ".env")
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"Resume tailor UI: http://{host}:{port}")

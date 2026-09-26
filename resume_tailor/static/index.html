@@ -21,6 +21,8 @@
     .help { color:var(--muted); font-size:14px; margin:0 0 14px; }
     textarea { display:block; width:100%; min-height:260px; padding:14px; border:1.5px solid var(--line); border-radius:10px; font:15px/1.5 inherit; color:var(--ink); resize:vertical; }
     textarea:focus { outline:none; border-color:var(--blue); box-shadow:0 0 0 3px rgba(21,93,252,.15); }
+    .options { margin-top:16px; }
+    .check { display:flex; gap:9px; align-items:flex-start; font-weight:400; margin:0 0 8px; }
     .row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; flex-wrap:wrap; }
     .kbd { color:var(--muted); font-size:13px; }
     .btn { appearance:none; border:0; border-radius:10px; padding:14px 22px; font:600 16px/1 inherit; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:8px; }
@@ -73,15 +75,18 @@
   <!-- 1. enter -->
   <section id="enter" class="card">
     <label for="jd">Paste the job description</label>
-    <p class="help">The whole posting is best. You'll get a new Word file with small, honest edits, a fit score, and every changed line shown before you download.</p>
+    <p class="help">Paste the whole posting to rewrite your summary, skills, and project descriptions for this role. Download the verified Word file and see every change below.</p>
     <textarea id="jd" placeholder="Paste the full job description here…"></textarea>
     <input type="file" id="file" accept=".docx" />
     <div class="fileline" id="fileline" hidden></div>
+    <div class="options">
+      <label class="check"><input type="checkbox" id="twoPass" /> Use a second polish pass (slower)</label>
+    </div>
     <div class="row">
       <span class="kbd">⌘ Enter to run · takes 2–5 minutes</span>
       <button class="btn primary big" id="go" type="button">Tailor resume</button>
     </div>
-    <div class="err" id="err" hidden></div>
+    <div class="err" id="err" role="alert" hidden></div>
   </section>
 
   <!-- 2. working -->
@@ -89,7 +94,8 @@
     <div class="spinner"></div>
     <h2>Tailoring…</h2>
     <div class="t" id="timer">0:00</div>
-    <p class="help">The model reads the posting, edits the resume, then every claim is checked against the original. Usually 2–5 minutes. Leave this tab open.</p>
+    <p class="help" id="progress" role="status">Preparing the resume…</p>
+    <p class="help">The model usually takes 2–5 minutes. The finished Word file is checked to make sure the edits were saved.</p>
   </section>
 
   <!-- 3. result -->
@@ -103,14 +109,14 @@
         </div>
       </div>
       <div class="cta">
-        <a class="btn primary big" id="dl" href="/api/download" hidden>Download Word resume</a>
+        <a class="btn primary big" id="dl" hidden>Download Word resume</a>
         <button class="btn primary big" id="retry" type="button" hidden>Run again</button>
         <button class="btn ghost" id="again" type="button">Tailor for another job</button>
       </div>
     </div>
     <div class="card banner red" id="blocked" hidden>
-      <h3>Not written — the edit went too far to fix line by line</h3>
-      <p>Nothing was saved, so there is nothing to download. Small inventions are fixed automatically and listed under “Check these”; this run broke something bigger. <b>Run again</b> usually gives a clean result.</p>
+      <h3>No download — the result failed checks</h3>
+      <p>Diagnostic files were saved for review. This run has no downloadable resume. Read the failures below before trying again.</p>
       <ul id="violations"></ul>
     </div>
     <div class="card banner amber" id="warn" hidden>
@@ -119,36 +125,57 @@
     </div>
     <h2 class="sec">What changed</h2>
     <div id="diff"></div>
-    <h2 class="sec">In the model's words</h2>
+    <h2 class="sec" id="changesHeading">Model's summary of changes</h2>
     <div class="card"><ul id="changes"></ul></div>
   </section>
 </div>
 <script>
   const $ = (id) => document.getElementById(id);
   const show = (id) => { for (const s of ["enter","working","result"]) $(s).hidden = s !== id; window.scrollTo({top:0, behavior:"smooth"}); };
-  let attached = null, tick = null;
+  let attached = null, tick = null, running = false, readingFile = false;
 
-  fetch("/api/health").then(r => r.json()).then(d => { $("baseName").textContent = d.base || "(none found)"; }).catch(() => {});
+  fetch("/api/health").then(r => r.json()).then(d => { if (!attached) $("baseName").textContent = d.base || "none yet, attach your .docx"; }).catch(() => {});
 
   $("pick").onclick = () => $("file").click();
   $("file").addEventListener("change", async (e) => {
-    const f = e.target.files && e.target.files[0]; attached = null; $("fileline").hidden = true;
+    const f = e.target.files && e.target.files[0];
     if (!f) return;
+    show("enter");
     if (!f.name.toLowerCase().endsWith(".docx")) { $("err").textContent = "Please choose a .docx file."; $("err").hidden = false; e.target.value = ""; return; }
-    const b = new Uint8Array(await f.arrayBuffer()); let s = "";
-    for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
-    attached = { name: f.name, b64: btoa(s) };
-    $("baseName").textContent = f.name; $("fileline").textContent = "Using " + f.name + " for this run only."; $("fileline").hidden = false;
+    if (f.size > 5000000) { $("err").textContent = "Please choose a Word file smaller than 5 MB."; $("err").hidden = false; e.target.value = ""; return; }
+    readingFile = true; $("go").disabled = true; $("pick").disabled = true;
+    try {
+      const b = new Uint8Array(await f.arrayBuffer()); let s = "";
+      for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+      attached = { name: f.name, b64: btoa(s) };
+      $("baseName").textContent = f.name; $("fileline").textContent = "Using " + f.name + " for tailoring. Simple single-column Word layouts are supported."; $("fileline").hidden = false;
+      $("err").hidden = true;
+    } catch (e) { $("err").textContent = "Could not read the Word file. Please choose it again."; $("err").hidden = false; }
+    finally { readingFile = false; $("go").disabled = false; $("pick").disabled = false; }
   });
 
   try { $("jd").value = localStorage.getItem("jd") || ""; } catch {}
   $("jd").addEventListener("input", () => { try { localStorage.setItem("jd", $("jd").value); } catch {} });
-  $("jd").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") run(); });
+  $("jd").addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); run(); } });
   $("go").onclick = run;
   $("retry").onclick = run;
   $("again").onclick = () => { $("jd").value = ""; try { localStorage.removeItem("jd"); } catch {} show("enter"); $("jd").focus(); };
 
   function list(id, items) { const ul = $(id); ul.textContent = ""; for (const t of items || []) { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); } return (items || []).length; }
+
+  function paintEvidence(items) {
+    const el = $("diff"); el.textContent = "";
+    for (const item of items) {
+      const block = document.createElement("div"); block.className = "change";
+      const heading = document.createElement("p"); heading.style.padding = "0 16px";
+      heading.textContent = item.section + (item.source_lines.length ? " · source lines " + item.source_lines.join(", ") : " · added passage");
+      block.appendChild(heading);
+      for (const [cls, text] of [["was", item.before || "No previous passage."], ["now", item.after || "Passage removed."]]) {
+        const d = document.createElement("div"); d.className = cls; d.textContent = text; block.appendChild(d);
+      }
+      el.appendChild(block);
+    }
+  }
 
   function paintDiff(text) {
     const el = $("diff"); el.textContent = "";
@@ -164,31 +191,53 @@
   }
 
   async function run() {
+    if (running || readingFile) return;
     const jd = $("jd").value.trim();
     if (!jd) { $("err").textContent = "Paste a job description first."; $("err").hidden = false; return; }
-    $("err").hidden = true; show("working");
+    if (jd.length > 60000) { $("err").textContent = "Job description is too long (maximum 60,000 characters)."; $("err").hidden = false; return; }
+    running = true; $("pick").disabled = true; $("twoPass").disabled = true;
+    $("dl").hidden = true; $("dl").removeAttribute("href");
+    $("err").hidden = true; $("timer").textContent = "0:00"; show("working");
+    $("progress").textContent = "Preparing the source resume…";
     const t0 = Date.now(); clearInterval(tick);
     tick = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("timer").textContent = `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`; }, 500);
-    const payload = { jd }; if (attached) { payload.resume_b64 = attached.b64; payload.resume_name = attached.name; }
+    const payload = { jd, two_pass: $("twoPass").checked }; if (attached) { payload.resume_b64 = attached.b64; payload.resume_name = attached.name; }
     let data;
     try {
       const res = await fetch("/api/tailor", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(payload) });
       data = await res.json().catch(() => ({}));
-      if (!res.ok && data.match_score == null) throw new Error(data.error || res.statusText);
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      if (res.status === 202) {
+        const statusUrl = data.status;
+        while (true) {
+          const statusResponse = await fetch(statusUrl);
+          const status = await statusResponse.json();
+          if (!statusResponse.ok) throw new Error(status.error || "Could not read this run's progress.");
+          if (status.state === "complete") { data = status.result; break; }
+          $("progress").textContent = status.message || "Working…";
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+      if (data.error) throw new Error(data.error);
     } catch (e) {
       clearInterval(tick); show("enter"); $("err").textContent = e.message; $("err").hidden = false; return;
+    } finally {
+      running = false; $("pick").disabled = false; $("twoPass").disabled = false;
     }
     clearInterval(tick);
-    const sc = data.match_score; const cls = !data.ok ? "blocked" : sc >= 75 ? "good" : sc >= 50 ? "mid" : "poor";
+    const sc = data.match_score; const cls = !data.ok ? "blocked" : sc == null ? "" : sc >= 75 ? "good" : sc >= 50 ? "mid" : "poor";
     $("ring").className = "ring " + cls; $("ring").textContent = sc ?? "–";
-    $("fit").textContent = data.ok ? (sc >= 75 ? "Good fit" : sc >= 50 ? "Partial fit" : "Poor fit") + ` · ${data.changed_lines || 0} line${data.changed_lines === 1 ? "" : "s"} changed` : "Not written";
-    $("why").textContent = (data.score_inferred ? "(score inferred from wording) " : "") + (data.match_line || "");
-    $("dl").hidden = !data.download; if (data.download) $("dl").href = data.download + "?t=" + Date.now();
+    $("ring").hidden = sc == null;
+    const cov = data.coverage ? data.coverage.score : null;
+    $("fit").textContent = data.ok ? (sc == null ? "Match estimate unavailable" : "Model estimate: " + (sc >= 75 ? "good fit" : sc >= 50 ? "partial fit" : "poor fit")) + ` · ${data.changed_lines || 0} line${data.changed_lines === 1 ? "" : "s"} changed` + (cov == null ? "" : ` · ${cov}% of JD keywords`) : "No downloadable result";
+    $("why").textContent = [data.match_line, data.score_note].filter((v,i,a) => v && a.indexOf(v) === i).join(" ");
+    $("dl").hidden = !data.download; if (data.download) $("dl").href = data.download;
     $("retry").hidden = !!data.ok;
     $("blocked").hidden = !list("violations", data.violations);
     $("warn").hidden = !list("warnings", data.warnings);
+    $("changesHeading").textContent = data.ok ? "Model's summary of changes" : "Proposed changes (not published)";
     if (!list("changes", data.changes)) $("changes").innerHTML = '<li class="empty">Nothing listed.</li>';
-    paintDiff(data.diff);
+    if (data.review_items && data.review_items.length) paintEvidence(data.review_items); else paintDiff(data.diff);
     show("result");
   }
 </script>

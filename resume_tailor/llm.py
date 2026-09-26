@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import ssl
 import time
+import threading
+from concurrent.futures import Future, TimeoutError as FutureTimeout
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
@@ -14,15 +17,18 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from resume_tailor.prompt import SYSTEM_PROMPT, build_user_prompt
+from resume_tailor.guardrails import _changed_content_lines
+from resume_tailor.structure import from_markdown
 
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "gpt-4o-mini"
-DEFAULT_TIMEOUT = 90
-NVIDIA_TIMEOUT = 300
+# Seconds per attempt. Replies are not streamed, so a full resume arrives all at once.
+DEFAULT_TIMEOUT = 300
 # A two-minute generation should not be thrown away because the provider was busy.
 MAX_ATTEMPTS = 3
 RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 RETRY_BACKOFF_SECONDS = (5, 20)
+DEFAULT_TOTAL_TIMEOUT = 360
 
 
 class LLMError(RuntimeError):
@@ -36,9 +42,6 @@ class TailorResult:
     match_line: str
     match_score: int | None
     raw: str
-    # True when the model gave no SCORE line and the number was inferred from
-    # the good/partial/poor wording rather than stated by the model.
-    score_inferred: bool = False
 
 
 def load_dotenv(path: Path) -> None:
@@ -75,8 +78,26 @@ def _is_nvidia(base_url: str, model: str) -> bool:
 
 def _strip_think(text: str) -> str:
     cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL | re.IGNORECASE)
-    cleaned = re.sub(r'</?think>', '', cleaned, flags=re.IGNORECASE)
+    if re.search(r'</?think>', cleaned, flags=re.IGNORECASE):
+        raise LLMError("The model returned an unfinished reasoning block instead of a complete answer.")
     return cleaned.strip()
+
+
+def _positive_seconds(value) -> float:
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise LLMError("Provider timeouts must be finite, positive seconds.") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise LLMError("Provider timeouts must be finite, positive seconds.")
+    return seconds
+
+
+def has_resume_changes(original: str, tailored: str) -> bool:
+    """Ignore Markdown decoration and typography when detecting an echoed resume."""
+    before = "\n".join(block.text for block in from_markdown(original))
+    after = "\n".join(block.text for block in from_markdown(tailored))
+    return bool(_changed_content_lines(before, after))
 
 
 def complete(
@@ -87,11 +108,17 @@ def complete(
     model: str = DEFAULT_MODEL,
     temperature: float | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    total_timeout: float | None = None,
+    progress=None,
 ) -> str:
     url = base_url.rstrip("/") + "/chat/completions"
     nvidia = _is_nvidia(base_url, model)
-    if nvidia and timeout == DEFAULT_TIMEOUT:
-        timeout = float(os.environ.get("OPENAI_TIMEOUT", NVIDIA_TIMEOUT))
+    if timeout == DEFAULT_TIMEOUT:
+        timeout = os.environ.get("OPENAI_TIMEOUT", DEFAULT_TIMEOUT)
+    timeout = _positive_seconds(timeout)
+    total_timeout = _positive_seconds(os.environ.get("OPENAI_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT) if total_timeout is None else total_timeout)
+    deadline = time.monotonic() + total_timeout
+    progress = progress or (lambda message: None)
     body: dict = {
         "model": model,
         "messages": list(messages),
@@ -104,7 +131,12 @@ def complete(
         body["top_p"] = 0.95
     max_tokens = os.environ.get("OPENAI_MAX_TOKENS", "").strip()
     if max_tokens:
-        body["max_tokens"] = int(max_tokens)
+        try:
+            body["max_tokens"] = int(max_tokens)
+        except ValueError as exc:
+            raise LLMError("OPENAI_MAX_TOKENS must be a positive integer.") from exc
+        if body["max_tokens"] <= 0:
+            raise LLMError("OPENAI_MAX_TOKENS must be a positive integer.")
     elif nvidia:
         body["max_tokens"] = 16384
     if nvidia:
@@ -124,14 +156,15 @@ def complete(
     )
     last_error: Exception | None = None
     for attempt in range(MAX_ATTEMPTS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LLMError("The model exceeded the total time limit. Run again when the provider is available.")
+        progress(f"Waiting for model reply — attempt {attempt + 1} of {MAX_ATTEMPTS}")
         try:
-            with urllib.request.urlopen(
-                request, timeout=timeout, context=_ssl_context()
-            ) as response:
-                body = json.loads(response.read().decode("utf-8"))
+            body = _request_with_deadline(request, min(timeout, remaining), remaining)
             break
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:2000]
+            detail = getattr(exc, "provider_detail", exc.reason)
             last_error = LLMError(f"LLM request failed (HTTP {exc.code}): {detail}")
             if exc.code not in RETRY_STATUS:
                 raise last_error from exc
@@ -139,29 +172,24 @@ def complete(
             last_error = LLMError(f"LLM request failed: {exc.reason}")
         except (TimeoutError, OSError) as exc:
             last_error = LLMError(f"LLM request failed: {exc}")
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             last_error = LLMError(f"LLM returned a non-JSON response: {exc}")
 
         if attempt == MAX_ATTEMPTS - 1:
             raise last_error
-        time.sleep(RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)])
+        delay = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
+        remaining = deadline - time.monotonic()
+        if delay >= remaining:
+            raise LLMError("The model exceeded the total time limit. No more retries were started.") from last_error
+        progress(f"Provider unavailable — retrying in {delay:g} seconds")
+        time.sleep(delay)
 
     try:
         choice = body["choices"][0]
         message = choice["message"]
         content = message.get("content")
-        if not (isinstance(content, str) and content.strip()):
-            # Reasoning text is not an answer; using it would paste the model's
-            # private chain of thought into the resume.
-            raise LLMError(
-                "LLM returned no answer content (only reasoning). "
-                "Try again, or set NVIDIA_ENABLE_THINKING=0."
-            )
-    except (KeyError, IndexError, TypeError) as exc:
-        raise LLMError(f"Unexpected LLM response shape: {body!r}") from exc
-    if not content.strip():
-        raise LLMError("LLM returned an empty message.")
-
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        raise LLMError("Unexpected LLM response shape: an answer message was missing.") from exc
     # A resume cut off at the token ceiling still parses as a valid document,
     # so the only place to catch it is here.
     if choice.get("finish_reason") == "length":
@@ -170,7 +198,49 @@ def complete(
             "Raise OPENAI_MAX_TOKENS (currently "
             f"{os.environ.get('OPENAI_MAX_TOKENS', 'unset')}) and try again."
         )
-    return _strip_think(content)
+    if choice.get("finish_reason") in {"content_filter", "tool_calls", "function_call"}:
+        raise LLMError("The provider did not return a complete resume answer.")
+    if not isinstance(content, str) or not content.strip():
+        raise LLMError(
+            "LLM returned no answer content (only reasoning or an empty message). "
+            "Try again, or set NVIDIA_ENABLE_THINKING=0."
+        )
+    answer = _strip_think(content)
+    if not answer:
+        raise LLMError("LLM returned only reasoning and no resume answer.")
+    return answer
+
+
+def _request_with_deadline(request, timeout: float, remaining: float):
+    # urllib's socket timeout is per operation. A daemon thread bounds the whole
+    # wait, including slow streaming responses; late replies are discarded.
+    # ponytail: a timed-out provider may finish remotely. Add provider-supported
+    # cancellation if the API offers it; never publish a late result.
+    future = Future()
+    def request_json():
+        try:
+            with urllib.request.urlopen(request, timeout=timeout, context=_ssl_context()) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            future.set_result(data)
+        except urllib.error.HTTPError as exc:
+            # Read error bodies inside the same deadline as successful replies.
+            try:
+                exc.provider_detail = exc.read(2000).decode("utf-8", errors="replace")
+            except Exception as read_error:
+                future.set_exception(read_error)
+                return
+            finally:
+                exc.close()
+            future.set_exception(exc)
+        except Exception as exc:
+            future.set_exception(exc)
+    threading.Thread(target=request_json, daemon=True).start()
+    try:
+        return future.result(timeout=remaining)
+    except FutureTimeout as exc:
+        if future.done():
+            raise  # a socket timeout from the request is eligible for retry
+        raise LLMError("The model exceeded the total time limit. Its late reply will not be used.") from exc
 
 
 def tailor_resume(
@@ -182,7 +252,11 @@ def tailor_resume(
     model: str = DEFAULT_MODEL,
     temperature: float | None = None,
     complete_fn=complete,
+    progress=None,
+    missing_keywords: list[str] | tuple[str, ...] = (),
+    polish: bool = False,
 ) -> TailorResult:
+    """One tailoring answer; a polish pass may leave an already-tailored resume as is."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -190,31 +264,54 @@ def tailor_resume(
             "content": build_user_prompt(
                 resume_markdown=resume_markdown,
                 job_description=job_description,
+                missing_keywords=missing_keywords,
+                polish=polish,
             ),
         },
     ]
-    raw = complete_fn(
-        messages,
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-        temperature=temperature,
+    deadline = time.monotonic() + _positive_seconds(
+        os.environ.get("OPENAI_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT)
     )
-    return parse_model_output(raw)
+    for attempt in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise LLMError("The model exceeded the total time limit before a usable resume was returned.")
+        raw = complete_fn(
+            messages,
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            temperature=temperature,
+            progress=progress,
+            total_timeout=remaining,
+        )
+        try:
+            result = parse_model_output(raw)
+            if not polish and not has_resume_changes(resume_markdown, result.resume_markdown):
+                raise LLMError("The model returned the original resume without any content changes.")
+            return result
+        except LLMError as exc:
+            if attempt:
+                raise LLMError(f"The model did not produce a usable tailored resume after one corrective retry: {exc}") from exc
+            if progress:
+                progress("Requesting a corrected response because the model returned unchanged or invalid output")
+            # Reuse the original request. Do not echo a malformed response or
+            # possible reasoning text back into the conversation.
+            messages = [*messages, {"role": "user", "content": (
+                f"The previous response failed validation: {exc} "
+                "Return the complete resume in the required CHANGELOG, MATCH, and RESUME sections. "
+                "Make substantive job-description-specific changes to the editable summary, skills, "
+                "and relevant experience. Preserve the protected identity and history fields."
+            )}]
 
 
-def _parse_match(chunk: str) -> tuple[int | None, str, bool]:
-    """Return (score, match_line, inferred).
-
-    `inferred` is True when the model gave no SCORE line and the number was
-    guessed from the good/partial/poor wording — the caller must not present
-    such a number as the model's own judgement.
-    """
+def _parse_match(chunk: str) -> tuple[int | None, str]:
+    """Keep absent, malformed, or out-of-range scores unknown."""
     score: int | None = None
     rest: list[str] = []
     # Tolerates "SCORE: 88", "**SCORE:** 88", "- Score = 88", "SCORE: 88/100".
     pattern = re.compile(
-        r"^[\s\-*_#>]*\**\s*score\s*\**\s*[:=]\s*\**\s*(\d{1,3})",
+        r"^[\s\-*_#>]*\**\s*score\s*\**\s*[:=]\s*\**\s*(\d{1,3})(?:\s*/\s*100)?[\s*]*$",
         re.IGNORECASE,
     )
     for raw in chunk.splitlines():
@@ -223,22 +320,18 @@ def _parse_match(chunk: str) -> tuple[int | None, str, bool]:
             continue
         match = pattern.match(line)
         if match:
-            score = max(0, min(100, int(match.group(1))))
+            value = int(match.group(1))
+            score = value if 0 <= value <= 100 else None
             continue
         rest.append(line)
     match_line = " ".join(rest)
-    inferred = False
-    if score is None:
-        low = match_line.lower()
-        for prefix, value in (("good", 85), ("partial", 62), ("poor", 38)):
-            if low.startswith(prefix):
-                score, inferred = value, True
-                break
-    return score, match_line, inferred
+    return score, match_line
 
 
 def parse_model_output(text: str) -> TailorResult:
-    raw = _strip_wrapping_fence(text).strip()
+    if not isinstance(text, str) or not text.strip():
+        raise LLMError("Model output was empty or was not text.")
+    raw = _strip_wrapping_fence(_strip_think(text)).strip()
     changelog_chunk = _require_section(raw, "CHANGELOG", "MATCH")
     match_chunk = _require_section(raw, "MATCH", "RESUME")
     resume_chunk = _require_open_section(raw, "RESUME")
@@ -250,10 +343,10 @@ def parse_model_output(text: str) -> TailorResult:
     ]
     if not changelog:
         raise LLMError("Model output had an empty CHANGELOG section.")
-    match_score, match_line, score_inferred = _parse_match(match_chunk)
+    match_score, match_line = _parse_match(match_chunk)
     if not match_line:
         raise LLMError("Model output had an empty MATCH section.")
-    resume_markdown = resume_chunk.strip()
+    resume_markdown = _strip_wrapping_fence(resume_chunk).strip()
     if not resume_markdown:
         raise LLMError("Model output had an empty RESUME section.")
     return TailorResult(
@@ -262,7 +355,6 @@ def parse_model_output(text: str) -> TailorResult:
         match_line=match_line,
         match_score=match_score,
         raw=text,
-        score_inferred=score_inferred,
     )
 
 

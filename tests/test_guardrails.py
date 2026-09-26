@@ -1,3 +1,5 @@
+import pytest
+
 from resume_tailor.guardrails import apply_guardrails, extract_facts, unified_diff
 from tests.helpers import (
     FIXTURE_RESUME_PATH,
@@ -71,22 +73,15 @@ def test_contact_block_is_restored():
     assert report.ok
 
 
-def test_invented_metric_is_rejected():
-    hacked = SAMPLE_RESUME.replace(
-        "Reduced duplicate processing in a batch pipeline by adding idempotency keys and CloudWatch alarms.",
-        "Reduced duplicate processing by 87% and saved $2M in a batch pipeline.",
-    )
+def test_invented_metric_line_is_put_back_instead_of_failing_the_run():
+    original = "Reduced duplicate processing in a batch pipeline by adding idempotency keys and CloudWatch alarms."
+    hacked = SAMPLE_RESUME.replace(original, "Reduced duplicate processing by 87% and saved $2M in a batch pipeline.")
     fixed, report = apply_guardrails(SAMPLE_RESUME, hacked)
     assert report.ok, report.violations
-    assert "87%" not in fixed and "$2M" not in fixed
-    assert any("87%" in w or "$2m" in w.lower() for w in report.warnings)
+    assert original in fixed and "87%" not in fixed and "$2M" not in fixed
+    assert any("Kept your original line" in w for w in report.warnings)
 
 
-def test_rewrite_is_rejected():
-    rewrite = "# totally different\n\n" + "\n".join(f"line {i}" for i in range(40))
-    _, report = apply_guardrails(SAMPLE_RESUME, rewrite)
-    assert not report.ok
-    assert any("rewrite" in v.lower() or "lines changed" in v.lower() for v in report.violations)
 
 
 def test_unified_diff_mentions_changed_summary():
@@ -105,12 +100,8 @@ def test_unified_diff_mentions_changed_summary():
 def test_fixtures_are_synthetic_not_production_resume():
     assert FIXTURE_RESUME_PATH.name == "synthetic_resume.md"
     assert "fixtures" in FIXTURE_RESUME_PATH.parts
-    assert "Sravya" not in SAMPLE_RESUME
-    assert "mksravya6" not in SAMPLE_RESUME.lower()
-    assert "253-200-7287" not in SAMPLE_RESUME
     assert "SAMPLE" in SAMPLE_RESUME
     assert "Alex Placeholder" in SAMPLE_RESUME
-    assert "Sravya" not in PIPE_RESUME
     assert "SAMPLE" in PIPE_RESUME
 
 
@@ -194,12 +185,18 @@ def test_inflated_job_title_is_rejected():
     assert any("title" in v.lower() for v in report.violations)
 
 
-def test_inflated_years_of_experience_is_rejected():
-    """METRIC_RE matched only currency and percentages, so "9+ years" was free."""
+def test_inflated_years_of_experience_are_put_back():
     hacked = FLAT_RESUME.replace("9+ years", "15+ years")
     fixed, report = apply_guardrails(FLAT_RESUME, hacked)
     assert report.ok, report.violations
-    assert "15+ years" not in fixed and "9+ years" in fixed
+    assert "9+ years" in fixed and "15+ years" not in fixed
+
+
+def test_rephrased_years_of_experience_are_the_same_claim():
+    tailored = FLAT_RESUME.replace("9+ years", "over 9 years")
+    fixed, report = apply_guardrails(FLAT_RESUME, tailored)
+    assert report.ok, report.violations
+    assert fixed == tailored
 
 
 def test_cosmetic_date_reformatting_is_not_a_violation():
@@ -215,66 +212,16 @@ def test_bulk_deletion_is_rejected():
     assert not report.ok
 
 
-def test_changelog_claiming_edits_with_no_diff_is_flagged():
-    """The exact signature of the shipped bug: 5 claimed edits, 0 lines changed."""
-    from resume_tailor.guardrails import check_changelog_matches_diff
-
-    claims = ["Updated the summary", "Reordered Technical Skills"]
-    assert check_changelog_matches_diff(claims, 0)
-    assert not check_changelog_matches_diff(claims, 4)
-    # A model that honestly reports making no changes must not be flagged.
-    assert not check_changelog_matches_diff(
-        ["No relevant experience to surface; left the resume unchanged"], 0
-    )
 
 
-def test_excessive_additions_are_rejected():
-    """Additions reach the Word file now, so they need a ceiling of their own."""
-    padded = SAMPLE_RESUME.rstrip("\n") + "\n" + "\n".join(
-        f"- Invented extra achievement {i}" for i in range(12)
-    )
-    _, report = apply_guardrails(SAMPLE_RESUME, padded)
-    assert not report.ok
-    assert any("added" in v.lower() for v in report.violations)
 
 
-def test_a_few_additions_are_allowed_but_warned():
-    padded = SAMPLE_RESUME.rstrip("\n") + "\n- Surfaced an existing Python skill\n"
-    _, report = apply_guardrails(SAMPLE_RESUME, padded)
-    assert report.ok, report.violations
-    assert any("added" in w.lower() for w in report.warnings)
 
 
-def test_invented_technology_is_rejected():
-    """Prompt rule 4 forbids inventing tools; nothing in code enforced it."""
-    hacked = SAMPLE_RESUME.replace(
-        "- Languages: Python, SQL, Bash", "- Languages: Python, SQL, Bash, GitOps, PySpark"
-    )
-    fixed, report = apply_guardrails(SAMPLE_RESUME, hacked)
-    assert report.ok, report.violations
-    assert "GitOps" not in fixed and "PySpark" not in fixed
-    assert "- Languages: Python, SQL, Bash" in fixed
 
 
-def test_a_tool_added_to_a_skills_line_is_rejected_even_if_it_looks_ordinary():
-    """"Terraform" and "Runbooks" are shaped like plain words but are new claims."""
-    hacked = SAMPLE_RESUME.replace(
-        "- Languages: Python, SQL, Bash", "- Languages: Python, SQL, Bash, Terraform"
-    )
-    fixed, report = apply_guardrails(SAMPLE_RESUME, hacked)
-    assert report.ok
-    assert "Terraform" not in fixed and any("Terraform" in w for w in report.warnings)
 
 
-def test_resurfacing_an_existing_tool_on_a_skills_line_is_allowed():
-    """The tool's whole purpose is surfacing evidence that is already there."""
-    facts_source = SAMPLE_RESUME
-    assert "CloudWatch" in facts_source
-    tailored = facts_source.replace(
-        "- Languages: Python, SQL, Bash", "- Languages: Python, SQL, Bash, CloudWatch"
-    )
-    _, report = apply_guardrails(facts_source, tailored)
-    assert report.ok, report.violations
 
 
 def test_unchanged_resume_raises_no_technology_violations():
@@ -284,30 +231,225 @@ def test_unchanged_resume_raises_no_technology_violations():
     assert not report.violations
 
 
-def test_changelog_claiming_many_edits_for_one_changed_line_is_flagged():
-    """A model listed four edits and had deleted one unrelated skill."""
-    from resume_tailor.guardrails import check_changelog_matches_diff
-
-    assert check_changelog_matches_diff(["Reworded summary", "Reordered skills", "Tweaked bullet"], 1)
-    assert not check_changelog_matches_diff(["Tweaked one bullet"], 1)
 
 
-def test_dropping_a_true_skill_is_warned():
-    tailored = SAMPLE_RESUME.replace("- Languages: Python, SQL, Bash", "- Languages: Python, SQL")
-    _, report = apply_guardrails(SAMPLE_RESUME, tailored)
-    assert any("Bash" in w for w in report.warnings)
 
 
-def test_prose_vouches_for_capitalised_skill_terms():
-    """"human-in-the-loop" in a bullet is evidence for "Human-in-the-Loop" on a skills line."""
-    base = "# A\na@b.com\n\n## Summary\n\n- Built human-in-the-loop review with structured outputs and prompt evaluation.\n\n## Skills\n\n- Tools: Python\n"
-    tailored = base.replace("- Tools: Python", "- Tools: Python, Human-in-the-Loop Review, Structured Outputs, Evals")
+
+
+
+
+def test_match_first_keeps_new_technology_named_in_the_job_description():
+    tailored = SAMPLE_RESUME.replace(
+        "- Languages: Python, SQL, Bash",
+        "- Languages: Python, SQL, Bash, PySpark, Terraform",
+    )
+    fixed, report = apply_guardrails(
+        SAMPLE_RESUME,
+        tailored,
+    )
+    assert report.ok, report.violations
+    assert "PySpark" in fixed and "Terraform" in fixed
+
+
+def test_match_first_does_not_require_an_exact_source_or_jd_vocabulary_match():
+    tailored = SAMPLE_RESUME.replace(
+        "- Languages: Python, SQL, Bash",
+        "- Languages: Python, SQL, Bash, Terraform",
+    )
+    fixed, report = apply_guardrails(
+        SAMPLE_RESUME,
+        tailored,
+    )
+    assert report.ok, report.violations
+    assert fixed == tailored
+    assert "Terraform" in fixed
+    assert not report.warnings
+
+
+def test_match_first_still_rejects_employer_date_and_education_changes():
+    tailored = (
+        SAMPLE_RESUME.replace("Northwind Platform Co. (SAMPLE)", "Invented Corp (FAKE)")
+        .replace("Jul 2023 – Present", "Jan 2020 – Present")
+        .replace("Placeholder State University (SAMPLE)", "Imaginary University (FAKE)")
+    )
+    _, report = apply_guardrails(
+        SAMPLE_RESUME,
+        tailored,
+    )
+    assert not report.ok
+    failures = " ".join(report.violations).lower()
+    assert "employer" in failures
+    assert "date" in failures
+    assert "education" in failures or "qualification" in failures
+
+
+
+
+def test_match_first_keeps_concrete_responsibilities_for_new_capabilities():
+    tailored = SAMPLE_RESUME.replace(
+        "- Built and operated Python services that ingest partner events and expose REST APIs for internal tools.",
+        "- Implemented Terraform infrastructure and SSO for internal services.",
+    )
+    fixed, report = apply_guardrails(
+        SAMPLE_RESUME,
+        tailored,
+    )
+    assert report.ok, report.violations
+    assert fixed == tailored
+    assert "Implemented Terraform infrastructure and SSO" in fixed
+    assert not report.warnings
+
+
+def test_match_first_rejects_a_new_named_project_even_when_the_jd_mentions_it():
+    tailored = SAMPLE_RESUME.replace(
+        "- Added Redis caching for read-heavy lookup endpoints and documented failure modes.",
+        "- Experience with SSO delivery for project named Phoenix Migration.",
+    )
+    fixed, report = apply_guardrails(
+        SAMPLE_RESUME,
+        tailored,
+    )
+    assert not report.ok
+    assert "Phoenix Migration" in fixed
+    assert any("Named clients or projects" in v for v in report.violations)
+
+
+def test_default_allows_full_resume_rewriting_without_a_line_ceiling():
+    base = "# Candidate\na@example.invalid\n\n## Summary\nOriginal summary.\n\n## Skills\n- Tools: Python\n\n## Experience\n### Sample Co | Jan 2020 – Present\n**Engineer**\n"
+    base += "\n".join(f"- Developed the original workflow component {chr(65 + i % 26)}." for i in range(160)) + "\n"
+    tailored = base.replace("Original summary.", "Backend engineer delivering secure APIs and reliable cloud services.").replace("- Tools: Python", "- Tools: Python, Terraform, OAuth 2.0, SAML 2.0, OpenTelemetry")
+    tailored = tailored.replace("Developed the original workflow component", "Implemented Terraform-managed services with SSO and observability for component")
+    fixed, report = apply_guardrails(base, tailored)
+    assert report.ok, report.violations
+    assert fixed == tailored
+    assert report.changed_line_count > 140
+
+
+def test_new_product_versions_and_standards_are_not_achievement_metrics():
+    tailored = PIPE_RESUME.replace("Built fictional Python services.", "Implemented OAuth 2.0, HTTP 429 retries, TLS 1.3, Python 3.12 and ISO 27001 controls.")
+    fixed, report = apply_guardrails(PIPE_RESUME, tailored)
+    assert report.ok, report.violations
+    assert fixed == tailored
+
+
+def test_rewriting_must_preserve_section_order():
+    tailored = PIPE_RESUME.replace("## Professional Summary", "## TEMP").replace("## Professional Experience", "## Professional Summary").replace("## TEMP", "## Professional Experience")
+    _, report = apply_guardrails(PIPE_RESUME, tailored)
+    assert not report.ok
+    assert any("Section headings or order" in v for v in report.violations)
+
+
+def test_rewriting_must_not_deliver_job_headings_with_no_bullets():
+    tailored = "\n".join(line for line in PIPE_RESUME.splitlines() if not line.startswith("- ")) + "\n"
+    _, report = apply_guardrails(PIPE_RESUME, tailored)
+    assert not report.ok
+    assert any("All bullets" in v for v in report.violations)
+
+
+
+
+def test_changed_or_duplicated_metric_keeps_the_original_line():
+    base = PIPE_RESUME.replace("Built fictional Python services.", "Reduced latency by 30% for Python services.")
+    for tailored in (base.replace("30%", "50%"), base.replace("More fiction.", "Reduced latency by 30%.")):
+        fixed, report = apply_guardrails(base, tailored)
+        assert report.ok, report.violations
+        assert fixed == base
+        assert any("Kept your original line" in w for w in report.warnings)
+
+
+def test_dropped_or_transferred_metric_keeps_the_original_line():
+    base = PIPE_RESUME.replace("Built fictional Python services.", "Reduced latency by 30% for Python services.")
+    dropped = base.replace("Reduced latency by 30%", "Reduced latency")
+    for tailored in (dropped, dropped.replace("More fiction.", "Reduced latency by 30%.")):
+        fixed, report = apply_guardrails(base, tailored)
+        assert report.ok, report.violations
+        assert fixed == base
+        assert any("Kept your original line" in w for w in report.warnings)
+
+
+def test_currency_scale_change_is_undone():
+    base = PIPE_RESUME.replace("Built fictional Python services.", "Saved $1 million with Python services.")
+    fixed, report = apply_guardrails(base, base.replace("$1 million", "$1 billion"))
+    assert report.ok, report.violations
+    assert fixed == base
+
+
+@pytest.mark.parametrize("claim,is_real", [
+    ("Certified Kubernetes Administrator and", False),
+    ("Certified kubernetes administrator and", False),
+    ("PMP certification holder and", False),
+    ("Certified in Kubernetes and", False),
+    ("AWS Certified Solutions Architect – Professional and", False),
+    ("AWS Certified Solutions Architect with Python expertise and", True),
+    ("AWS Certified Solutions Architect – Associate and", True),
+    ("AWS-certified", True),
+])
+def test_invented_certifications_are_undone_but_real_ones_can_be_mentioned(claim, is_real):
+    summary = "Contract software engineer focused"
+    tailored = SAMPLE_RESUME.replace(summary, f"{claim} contract software engineer focused")
+    fixed, report = apply_guardrails(SAMPLE_RESUME, tailored)
+    assert report.ok, report.violations
+    assert (fixed == tailored) is is_real
+    assert summary in fixed or is_real
+
+
+def test_certification_lists_and_uncertified_resumes_are_checked():
+    listed = SAMPLE_RESUME.replace("- Data: PostgreSQL, Redis", "- Data: PostgreSQL, Redis\n- Certifications: AWS Solutions Architect, CKA")
+    fixed, report = apply_guardrails(SAMPLE_RESUME, listed)
+    assert report.ok and "CKA" not in fixed
+    lowercase = SAMPLE_RESUME.replace("- Data: PostgreSQL, Redis", "- Data: PostgreSQL, Redis\n- pmp certification")
+    fixed, report = apply_guardrails(SAMPLE_RESUME, lowercase)
+    assert report.ok and "pmp" not in fixed
+    fixed, report = apply_guardrails(PIPE_RESUME, PIPE_RESUME.replace("Fictional contractor", "AWS Certified fictional contractor"))
+    assert report.ok and "AWS Certified" not in fixed
+
+
+def test_rewritten_summary_with_invented_certification_keeps_the_original_summary():
+    original = SAMPLE_RESUME.split("## Summary\n", 1)[1].split("\n", 1)[0]
+    tailored = SAMPLE_RESUME.replace(original, "Certified Kubernetes Administrator delivering platform migrations.")
+    fixed, report = apply_guardrails(SAMPLE_RESUME, tailored)
+    assert report.ok, report.violations
+    assert original in fixed
+
+
+def test_new_bullet_next_to_a_rewrite_that_drops_a_number_is_kept():
+    base = PIPE_RESUME.replace("- Built fictional Python services. No real employer.", "- Reduced latency by 30% for Python services.")
+    tailored = base.replace("- Reduced latency by 30% for Python services.",
+                            "- Built a Grafana dashboard for service health.\n- Reduced latency for Python services using caching.")
+    fixed, report = apply_guardrails(base, tailored)
+    assert report.ok, report.violations
+    assert "Grafana dashboard" in fixed and "Reduced latency by 30%" in fixed
+    assert fixed.count("Reduced latency") == 1
+
+
+def test_lowercase_text_after_project_is_not_a_named_project():
+    base = PIPE_RESUME.replace("Built fictional Python services.", "Led the project: migrated fictional services.")
+    tailored = base.replace("migrated fictional services", "modernized fictional Python services on AWS")
     _, report = apply_guardrails(base, tailored)
     assert report.ok, report.violations
 
 
-def test_hyphenated_skill_terms_are_judged_whole():
-    """"Multi-agent" was split at the hyphen and "Multi" reported as invented."""
-    base = "# A\na@b.com\n\n## Summary\n\n- Built multi-agent workflows.\n\n## Skills\n\n- AI: LangGraph\n"
-    _, report = apply_guardrails(base, base.replace("- AI: LangGraph", "- AI: LangGraph, Multi-agent"))
+def test_adding_a_headline_does_not_restore_the_old_header():
+    tailored = PIPE_RESUME.replace("pipe-format@example.invalid\n", "pipe-format@example.invalid\nPlatform Engineer | API Security\n")
+    fixed, report = apply_guardrails(PIPE_RESUME, tailored)
     assert report.ok, report.violations
+    assert fixed == tailored
+    assert not report.restored_contact
+
+
+def test_contact_repair_preserves_a_new_headline():
+    tailored = PIPE_RESUME.replace("pipe-format@example.invalid\n", "changed@example.invalid\nPlatform Engineer | API Security\n")
+    fixed, report = apply_guardrails(PIPE_RESUME, tailored)
+    assert report.ok, report.violations
+    assert report.restored_contact
+    assert "pipe-format@example.invalid" in fixed
+    assert "changed@example.invalid" not in fixed
+    assert "Platform Engineer | API Security" in fixed
+
+
+def test_rewriting_cannot_leave_a_summary_heading_with_no_content():
+    tailored = PIPE_RESUME.replace("Fictional contractor used only in unit tests. SAMPLE / REPLACE ME.", "")
+    _, report = apply_guardrails(PIPE_RESUME, tailored)
+    assert not report.ok
+    assert any("content was emptied" in v for v in report.violations)

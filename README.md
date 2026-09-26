@@ -1,217 +1,87 @@
 # Resume tailor
 
-Paste a job description. Get a **new Word resume** in the same layout as the parent file, plus a **0–100 match score**. The original resume is never overwritten.
+Paste a job description and download a Word resume rewritten for that role. The app rewrites the headline, summary, skills, and experience bullets, and adds the job's skills and tools even when the original resume does not mention them. Employers, job titles, dates, education, certifications, contact details, and numbers stay exactly as they are in the original.
 
-This is a surgical editor for contract-to-contract tailoring. A human should be able to review the result in about 1–5 minutes. It is not a rewrite tool and it will not invent jobs, dates, tools, or metrics.
+The original file is never changed. Each run writes into its own folder, and the saved Word file is checked against the approved text before it can be downloaded.
 
+## Run locally
 
-## Attach a base resume
-
-In the UI, step **0. Base resume** accepts an optional `.docx`. If you attach one, that file is the base for the run (saved under `out/uploads/`, never overwriting your original). If you leave it empty, the in-repo `resume/*.docx` is used.
-
-After a run, **Changes (diff)** shows the exact line edits so you can review before downloading.
-
-## How the site is built
-
-There is no React app, no Node server, and no database. One small Python package does everything:
-
-1. **Browser UI** — a single static page (`resume_tailor/static/index.html`) served by Python’s stdlib `http.server`. You paste a JD and click **Tailor resume**.
-2. **API** — `POST /api/tailor` with `{ "jd": "..." }`. Health check is `GET /api/health`. Download is `GET /api/download`.
-3. **One LLM call** — OpenAI-compatible Chat Completions (`resume_tailor/llm.py`). Today that is NVIDIA NIM (Nemotron 3 Ultra) via `https://integrate.api.nvidia.com/v1`. Any compatible provider works by changing `.env`.
-4. **Guardrails** — code rejects invented employers, dates, metrics, extra jobs, and oversized rewrites. If the model goes too far, the parent file stays untouched and `out/resume.rejected.md` is written instead.
-5. **Word output** — the parent `.docx` is cloned. Edited lines are mapped onto existing paragraphs so fonts, spacing, and layout stay the same. The new file lands in `out/` (for this resume: `out/Sravya_M_resume_tailored.docx`).
-
-```
-Browser (127.0.0.1:8787)
-        │  paste JD
-        ▼
-resume_tailor/server.py
-        │
-        ▼
-structure.py  ── parent .docx → typed blocks → markdown
-        │  one Chat Completions call
-        ▼
-NVIDIA NIM / OpenAI-compatible model
-        │  changelog + score + tailored markdown
-        ▼
-guardrails  ── facts preserved? changelog honest? size sane?
-        │
-        ▼
-docx_io  ── ordered block alignment → clone parent → out/*_tailored.docx
-```
-
-If the tailored resume comes back identical to the original, the changelog says
-so in bold and the run is marked failed when the model claimed otherwise. A
-silently-unchanged download is the one failure this tool is built to make loud.
-
-The match score is the model’s honest 0–100 against the JD must-haves (years, required tools, domain). A low score usually means the JD does not match the resume, not that the site is broken.
-
-## Which model, and why it is slow
-
-Six models on this NVIDIA key were run on the same two job descriptions (one a
-good fit, one a poor fit) on 4 Sep 2026. Only one produced an honest, edited,
-guardrail-passing resume:
-
-| Model | Time | Good-fit JD | Poor-fit JD |
-|---|---|---|---|
-| **nemotron-3-ultra, thinking on** (default) | 2–5 min | 85, passed, real edits | 35, blocked GitOps/IRSA |
-| nemotron-3-ultra, thinking off | 107–224 s | 78, passed | 55, **13 fabricated tools + a metric** |
-| nemotron-3-super-120b, thinking on | 96 s | 50, passed, no real tailoring | — |
-| nemotron-3-super-120b, thinking off | 27–77 s | returned the resume **unchanged** while listing 3 edits | 30 |
-| nemotron-3.5-lightning-30b | 95 s | — | 68, listed 4 edits, changed 1 unrelated line |
-| nemotron-3-nano-omni-30b | 46 s | — | 65, fabricated 9 tools |
-| gpt-oss-20b | 135 s | — | 60, rewrote 52 lines |
-
-The wait is the price of the honesty. Thinking is what stops the model
-importing keywords from the job description; turning it off is not reliably
-faster and roughly doubles fabrication. Every fabrication above was caught by
-the guardrails, so a faster model does not save time — it produces a rejected
-run you then re-do.
-
-## Why the score is not 80–90 on every job
-
-The score is the model's honest read of how well the **base resume** fits the
-job. It is not something the tool can raise. The only way to score 90 on every
-posting is to let the model claim experience she does not have — which is
-exactly what the guardrails exist to stop, and what they stop several times a
-day in practice.
-
-The lever that works is the base resume itself. It is the ceiling. If she has
-set SLOs, done GitOps, handled HIPAA data, add it to `resume/Sravya_M_resume.docx`
-once; every future run can then surface it. Ten minutes making the base
-complete does more for scores than any model or prompt change, and it is true.
-
-## Requirements
-
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) — installs Python 3.11+ if needed
-- An API key for an OpenAI-compatible chat model (NVIDIA `nvapi-…` or OpenAI `sk-…`)
-- The parent resume as a Word file in `resume/` (this repo ships `resume/Sravya_M_resume.docx`)
-
-Install uv once:
-
-```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-## Run it (someone new, without the original builder)
-
-From the repo root:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then run from the project folder:
 
 ```bash
 uv sync
 cp .env.example .env
 ```
 
-Edit `.env`. **Never commit `.env`.**
+Set the API key, base URL, and model in `.env` (see `.env.example`). Any OpenAI-compatible Chat Completions endpoint works; set the URL and model together when changing providers. Do not commit `.env`.
 
-NVIDIA (current setup on the Mac mini):
-
-```
-OPENAI_API_KEY=nvapi-your-key
-OPENAI_BASE_URL=https://integrate.api.nvidia.com/v1
-OPENAI_MODEL=nvidia/nemotron-3-ultra-550b-a55b
-OPENAI_MAX_TOKENS=16384
-OPENAI_TIMEOUT=300
-NVIDIA_ENABLE_THINKING=1
-```
-
-Get a key at [build.nvidia.com](https://build.nvidia.com). Do not paste keys into chat.
-
-OpenAI instead:
-
-```
-OPENAI_API_KEY=sk-your-key
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_MODEL=gpt-5.6-terra
-```
-
-Start the UI:
+Put your Word resume in the `resume/` folder, or attach it in the app for a single run. Files in `resume/` are never committed, so a `git pull` never touches them.
 
 ```bash
 uv run python -m resume_tailor --serve
 ```
 
-Open [http://127.0.0.1:8787](http://127.0.0.1:8787). Paste a job description. Click the blue **Tailor resume** button. Wait (NVIDIA Ultra with thinking can take a couple of minutes). Download the Word file from the page, or grab `out/Sravya_M_resume_tailored.docx`.
+Open [the local app](http://127.0.0.1:8787), paste the job description, and choose **Tailor resume**. Progress and provider retries appear while the run is active. An optional second pass polishes the first result.
 
-Safari: hard-refresh with **Cmd-Shift-R** if the page looks stale. The UI is a simple light form on purpose so Reader mode does not eat the submit button.
+## What the checks do
 
-Another port:
+- **Skills and wording change freely.** Missing job keywords are sent to the model as editing targets. There is no edit budget.
+- **Work history is protected.** A changed employer, job title, date, degree, certification, or named client/project fails the run with no download, because those are what employment and background checks verify.
+- **Numbers stay with their role.** If an edit adds, changes, or drops a number (for example a new "40% faster", or "$1 million" becoming "$1 billion"), that line keeps its original wording and the run continues. "11+ years" and "over 11 years" count as the same claim.
+- **Certifications cannot be invented.** A line that claims a certification the original does not have keeps its original wording. Mentioning a real certification elsewhere, such as in the summary, is fine.
+- **Contact details** altered by the model are restored from the original.
+- An unchanged model reply gets one corrective retry. A result that is still unchanged fails with no download.
 
-```bash
-uv run python -m resume_tailor --serve --port 8787
-```
+Two different numbers are reported. **Keyword coverage** is the share of skill-like words from the job description (Python, AWS, Kubernetes, …) that appear in the final resume; the ones still missing are listed. It is a shape-based guess, so a few non-skills, such as city names, can appear in the missing list, and one-letter languages such as R are not detected. The **model estimate** is the model grading its own rewrite and is usually high. Neither is an ATS score or a hiring guarantee.
 
-CLI (same backend, no browser):
+## Supported Word layouts
+
+Use a single column of body paragraphs with recognizable section headings. Write each job heading as `Company | dates`, followed by a job-title paragraph. Month names, numeric month/year, year-only ranges, and Present/Current/Now are supported.
+
+Tables, columns, text boxes, content in headers or footers, tracked changes, fields, and manual line breaks inside paragraphs are rejected before model work. Word list styles and paragraph numbering are supported. Existing bold/italic run formatting is retained where text survives. Section and job headings stay with their following content to reduce orphaned headings.
+
+A rewritten document may paginate differently from the input. Text verification checks saved content and order; it is not a visual layout proof for every possible template.
+
+## CLI
 
 ```bash
 uv run python -m resume_tailor --jd path/to/jd.txt
-uv run python -m resume_tailor --jd -                 # paste JD, then Ctrl-D
+uv run python -m resume_tailor --jd path/to/jd.txt --two-pass
+uv run python -m resume_tailor --jd path/to/jd.txt --resume path/to/resume.docx
+uv run python -m resume_tailor --jd -
 ```
 
-## What it will change
+Outputs are isolated under `out/runs/<run-id>/`. Each successful run contains a source snapshot, the tailored resume (same file name as the original), a changelog, a diff, the raw model reply, and a digest manifest. `out/latest.json` points to the latest CLI run; failed runs have no resume path. `--out` selects a different output root.
 
-- A few JD keywords that are already true
-- Light retarget of the summary
-- Reorder / surface skills already evidenced
-- Tweak 1–3 bullets on the most relevant recent roles
+## HTTP API
 
-## What it will not change
+`POST /api/tailor` accepts JSON with `jd` and optional `two_pass`, `resume_b64`, and `resume_name`. It returns 202 with a run-specific status URL. Poll `GET /api/status/<run-id>` until `state` is `complete`, then inspect `result.ok` and `result.download`.
 
-- Employers, dates, titles, education, certifications, or metrics
-- Jobs that were not on the parent resume
-- Tools the resume does not already list
-- The parent Word file (`resume/Sravya_M_resume.docx`)
+`GET /api/download/<run-id>` serves only that run's verified artifact. Its digest is rechecked before download. Failed runs and modified files cannot download. `GET /api/health` names the default resume. Only one run is active at a time; overlapping submissions receive 409.
 
-These are enforced in code, not just asked for in the prompt. A run that adds a
-tool or skill term absent from the base resume fails and writes
-`out/resume.rejected.md` for review instead of a Word file. That is working as
-intended — read the violation, and either drop the term or add the real
-experience to the parent `.docx`.
+Requests must target the local server, and browser requests must use its own origin. Job descriptions are limited to 60,000 characters, request bodies to 8 MB, and attached Word files to 5 MB compressed and 25 MB expanded. Provider attempts share a bounded deadline. A timed-out provider may still finish remotely; late responses cannot publish a result.
 
-A poor-match JD is not a reason to overhaul the resume. The score should say so.
+## Implementation
 
-## Layout
+- `structure.py` parses Word paragraphs into typed blocks.
+- `prompt.py` defines the editing rules; `llm.py` handles provider calls, deadlines, parsing, and the corrective retry.
+- `pipeline.py` shares orchestration between CLI and HTTP, measures keyword coverage, checks the result against the original, and publishes verified artifacts.
+- `guardrails.py` protects identity, work history, qualifications, and numbers, and produces the before/after evidence.
+- `docx_io.py` writes and verifies Word output; `files.py` publishes files atomically.
+- `server.py` and `static/index.html` provide the local app.
 
-```
-resume/Sravya_M_resume.docx   parent Word resume — the source of truth, never overwritten
-resume/base.md                stale markdown copy; NOT read by the tool (see below)
-resume_tailor/                Python package
-  server.py                   localhost UI + /api/tailor
-  static/index.html           the website
-  structure.py                .docx → typed blocks → markdown, and back
-  llm.py                      OpenAI-compatible client, retry + truncation check
-  prompt.py                   surgical-edit + scoring instructions
-  guardrails.py               reject invented facts, bulk edits, dishonest changelogs
-  docx_io.py                  ordered alignment, run-preserving Word writer
-out/                          gitignored outputs (Word, changelog, diff)
-.env.example                  env template
-```
-
-`resume/base.md` is a leftover text copy. The tool reads the `.docx` directly and
-derives its markdown from it, so editing `base.md` has no effect. Update the Word
-file instead.
-
-## Tests
+## Verification and deployment scope
 
 ```bash
 uv run pytest
+uv build --wheel
+uv venv out/wheel-check
+uv pip install --python out/wheel-check/bin/python dist/*.whl
+out/wheel-check/bin/python tests/check_installed.py
 ```
 
-Tests mock the LLM and use fake fixtures only. No network. No production resume
-content — `tests/test_docx_io.py` builds its own synthetic `.docx` at runtime.
+Tests use synthetic resumes and mocked providers, and never read `.env`. HTTP tests open loopback sockets. The installed-package check verifies that the wheel includes and serves the UI. CI runs the suite and packaging check on Python 3.11.
 
-Coverage deliberately includes the shapes that used to be untested: a
-heading-less (flat) document through the guardrails, and the Word writer itself,
-including that an unchanged input produces a byte-identical document.
+This is a **local single-user application**. Public deployment needs account authentication, tenant isolation, managed secrets, retention controls, and a deployment stack appropriate for that environment. Per-run storage grows until the operator removes old runs. Automated checks and test doubles do not establish live writing quality; review actual outputs on representative job descriptions before relying on a provider/model combination.
 
-## Updating the parent resume
-
-Replace `resume/Sravya_M_resume.docx` with the new Word file. The tailor reads paragraphs from that file. Keep a markdown extract in `resume/base.md` if you want a readable copy in git.
-
-This repo contains a real resume (name, email, phone). Keep the GitHub repository
-**private**. Note that as it stands this folder is not a Git repository at all —
-there is no `.git`, no remote, and no history, so nothing here is recoverable if
-it is lost. `.env` holds a live API key; rotate it before the folder goes anywhere.
-
-`examples/sample_jd.txt` is written to mirror this resume closely, so it will
-always score well. Use a real posting when you want to judge the tool.
+Resumes in `resume/`, generated outputs in `out/`, and credentials in `.env` are excluded from Git.

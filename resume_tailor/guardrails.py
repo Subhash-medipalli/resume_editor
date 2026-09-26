@@ -1,18 +1,16 @@
-"""Code-level guardrails: preserve facts, contact, structure; cap rewrite size."""
+"""Preserve document identity, history, structure, and metrics during tailoring."""
 
 from __future__ import annotations
 
 import difflib
 import re
+from collections import Counter
 from dataclasses import dataclass, field
+from resume_tailor.structure import DATE_SPAN_RE
 
 MONTH = (
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-)
-DATE_SPAN_RE = re.compile(
-    rf"{MONTH}\s+\d{{4}}\s*[–—-]\s*(?:Present|{MONTH}\s+\d{{4}})",
-    re.IGNORECASE,
 )
 # An email address or a phone number — the details this guardrail exists to protect.
 CONTACT_MARKER_RE = re.compile(
@@ -20,27 +18,6 @@ CONTACT_MARKER_RE = re.compile(
 )
 H2_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 H3_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
-# Quantities a reader would treat as a factual claim. The narrow original
-# version matched only currency and percentages, so "11+ years" — the most
-# load-bearing number on the resume — could be changed freely.
-METRIC_RE = re.compile(
-    r"\$\s?[\d,]+(?:\.\d+)?\s?(?:[KMB]|thousand|million|billion)?"
-    r"|\b\d[\d,]*(?:\.\d+)?\s*\+?\s*"
-    r"(?:%|percent|x\b|[KMB]\b|million|billion|years?|months?|weeks?|days?|hours?|"
-    r"users?|customers?|clients?|records?|models?|engineers?|people|teams?)"
-    r"|\b\d{1,3}(?:,\d{3})+\+?",
-    re.IGNORECASE,
-)
-
-# Hard fail if the model rewrote most of the document.
-MAX_CHANGED_LINE_RATIO = 0.35
-MAX_CHANGED_LINES_HARD = 80
-# Warn (still accept) above this many changed content lines.
-WARN_CHANGED_LINES = 25
-# Deleting this many lines is a rewrite, not a tailoring pass.
-MAX_REMOVED_LINES = 6
-# Additions now reach the Word file, so they need a ceiling of their own.
-MAX_ADDED_LINES = 8
 
 
 @dataclass
@@ -50,8 +27,7 @@ class GuardrailReport:
     warnings: list[str] = field(default_factory=list)
     restored_contact: bool = False
     changed_line_count: int = 0
-    removed_line_count: int = 0
-    added_line_count: int = 0
+    review_items: list[dict] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -64,7 +40,6 @@ class ProtectedFacts:
     date_spans: tuple[str, ...]
     education_lines: tuple[str, ...]
     cert_lines: tuple[str, ...]
-    metrics: tuple[str, ...]
 
 
 def extract_facts(markdown: str) -> ProtectedFacts:
@@ -86,7 +61,6 @@ def extract_facts(markdown: str) -> ProtectedFacts:
     date_spans = tuple(_canon_span(m.group(0)) for m in DATE_SPAN_RE.finditer(text))
     education_lines = _section_item_lines(text, "education")
     cert_lines = _section_item_lines(text, "certifications")
-    metrics = tuple(sorted({_canon_metric(m) for m in METRIC_RE.findall(text)}))
     return ProtectedFacts(
         contact_block=contact,
         h2_headings=h2,
@@ -96,12 +70,15 @@ def extract_facts(markdown: str) -> ProtectedFacts:
         date_spans=date_spans,
         education_lines=education_lines,
         cert_lines=cert_lines,
-        metrics=metrics,
     )
 
 
 def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
-    """Restore contact block if needed; flag invented or dropped facts."""
+    """Protect identity, work history, qualifications, and numbers.
+
+    Skills and wording may change freely. A line that changes a number or claims
+    a new certification gets its original back instead of failing the whole run.
+    """
     report = GuardrailReport(ok=True)
     base_n = _normalize(base)
     out = _normalize(tailored)
@@ -114,7 +91,15 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
             "Name or contact details were altered by the model; restored from the base resume."
         )
 
+    out, undone = _repair_lines(base_n, out)
+    for line in undone:
+        report.warnings.append(
+            "Kept your original line because the edit changed a number or claimed a "
+            f"certification: “{line[:70]}…”"
+        )
+
     out_facts = extract_facts(out)
+    report.violations.extend(_check_bound_facts(base_n, out))
 
     if len(out_facts.h2_headings) != len(base_facts.h2_headings):
         report.violations.append(
@@ -122,12 +107,8 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
             f"({len(base_facts.h2_headings)} → {len(out_facts.h2_headings)}). "
             "Preserve section order and structure."
         )
-    else:
-        for original, new in zip(base_facts.h2_headings, out_facts.h2_headings):
-            if original != new:
-                report.warnings.append(
-                    f"Section heading tweaked: {original!r} → {new!r}."
-                )
+    elif tuple(_fact_text(h) for h in base_facts.h2_headings) != tuple(_fact_text(h) for h in out_facts.h2_headings):
+        report.violations.append("Section headings or order changed. Preserve the document structure.")
 
     if len(out_facts.job_headings) > len(base_facts.job_headings):
         report.violations.append(
@@ -173,129 +154,267 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     for line in base_facts.cert_lines:
         if line.translate(_TYPOGRAPHY).lower() not in out_norm:
             report.violations.append(f"Certification line missing: {line}")
-    # Content-level inventions (a number, a tool, a skill term the base resume
-    # never had) are fixed line by line: the offending line goes back to the
-    # original and everything else the model did survives. Blocking the whole
-    # run for one bad clause meant the user got nothing, run after run.
-    base_tech = _known_vocabulary(base_n)
-    offenders: set[str] = {m for m in out_facts.metrics if m not in base_facts.metrics}
-    for token in _technology_tokens(out):
-        if _stem(token) not in base_tech:
-            offenders.add(token.lower())
-    already = {_stem(token) for token in _technology_tokens(out)}
+    if _named_history(base_n) != _named_history(out):
+        report.violations.append("Named clients or projects changed. Preserve their names.")
+    known = _known_credentials(base_n)
+    if any(_credential_claims(line) - known for line in out.splitlines()):
+        report.violations.append("A certification claim is not on the base resume.")
 
-    def evidenced(token: str) -> bool:
-        stem = _stem(token)
-        if stem in base_tech or stem in already:
-            return True
-        # ponytail: prefix match so "Evals" is vouched for by "evaluation" and
-        # "Alerting" by "alerts". Swap for a synonym list if it lets a fake through.
-        return len(stem) >= 4 and any(known.startswith(stem) for known in base_tech)
-
-    for token in _skill_line_tokens(out):
-        if not evidenced(token):
-            offenders.add(token.lower())
-
-    if offenders:
-        out, reverted = _revert_lines_containing(base_n, out, offenders)
-        for why, line in reverted:
-            report.warnings.append(
-                f"Put back the original line because the model added {why!r}, "
-                f"which is not on the base resume: \u201c{line[:70]}\u2026\u201d"
+    report.changed_line_count = _changed_content_lines(base_n, out)
+    report.review_items = review_edits(base_n, out)
+    # Compare quantities inside each role/section, so broad rewrites and bullet
+    # reordering work without allowing a metric to migrate to another employer.
+    original_scopes, edited_scopes = _scopes(base_n), _scopes(out)
+    for section in dict.fromkeys([*original_scopes, *edited_scopes]):
+        old_lines = [line for _, line in original_scopes.get(section, [])]
+        new_lines = [line for _, line in edited_scopes.get(section, [])]
+        if any(not line.lstrip().startswith("#") for line in old_lines) and not any(
+            not line.lstrip().startswith("#") for line in new_lines
+        ):
+            report.violations.append(f"Section or role content was emptied in {section}.")
+        if any(line.lstrip().startswith("- ") for line in old_lines) and not any(
+            line.lstrip().startswith("- ") for line in new_lines
+        ):
+            report.violations.append(f"All bullets were removed or flattened in {section}. Preserve bullet structure.")
+        # _repair_lines has already undone isolated edits; what remains is structural.
+        if Counter(_quantities("\n".join(old_lines))) != Counter(_quantities("\n".join(new_lines))):
+            report.violations.append(
+                f"Numbers or units changed in {section}. Preserve metrics with their original role or section."
             )
-        # Anything that survived the revert is a fabrication we could not isolate.
-        for offender in sorted(offenders):
-            if _line_has_offender(out, {offender}):
-                report.violations.append(
-                    f"Invented {offender!r} is not on the base resume and could not be removed."
-                )
-
-    lost = sorted({_stem(t): t for t in _skill_line_tokens(base_n)}.items())
-    kept = {_stem(t) for t in _skill_line_tokens(out)} | {_stem(t) for t in _technology_tokens(out)}
-    lost = [t for stem, t in lost if stem not in kept and stem in {_stem(x) for x in _skill_line_tokens(base_n)}]
-    if lost:
-        report.warnings.append(
-            "Skills dropped from a skills line — make sure that was intended: " + ", ".join(lost[:12])
-        )
-
-    changed = _changed_content_lines(base_n, out)
-    report.changed_line_count = changed
-    added = _added_content_lines(base_n, out)
-    report.added_line_count = added
-    if added > MAX_ADDED_LINES:
-        report.violations.append(
-            f"{added} new lines were added. A surgical edit surfaces existing "
-            "evidence; it does not write new resume content."
-        )
-    elif added:
-        report.warnings.append(f"{added} line(s) added — check every claim is already true.")
-    removed = _removed_content_lines(base_n, out)
-    report.removed_line_count = removed
-    if removed > MAX_REMOVED_LINES:
-        report.violations.append(
-            f"{removed} lines were dropped from the resume. A surgical edit does "
-            "not delete content."
-        )
-    elif removed:
-        report.warnings.append(f"{removed} line(s) removed — check nothing important was lost.")
-    base_count = max(len(_content_lines(base_n)), 1)
-    ratio = changed / base_count
-    if changed > MAX_CHANGED_LINES_HARD or ratio > MAX_CHANGED_LINE_RATIO:
-        report.violations.append(
-            f"Too many lines changed ({changed} lines, {ratio:.0%} of the resume). "
-            "This looks like a rewrite, not a surgical edit."
-        )
-    elif changed > WARN_CHANGED_LINES:
-        report.warnings.append(
-            f"{changed} lines changed — still review, but this is heavier than a typical 1-minute pass."
-        )
-
     report.ok = not report.violations
     if not out.endswith("\n"):
         out += "\n"
     return out, report
 
 
-# Phrases a model uses when it is reporting that it deliberately changed nothing.
-# Anything else in a changelog is treated as a claim that an edit was made, so
-# this check fails loud by default rather than relying on a verb whitelist.
-NO_CHANGE_RE = re.compile(
-    r"no (?:substantive |material |relevant )?(?:edits?|changes?|content|"
-    r"modifications?)\b|left (?:it |the resume |them )?(?:unchanged|as-is|as is|"
-    r"intact|untouched)|unchanged\b|not (?:modified|changed|altered)|"
-    r"nothing (?:was )?(?:changed|added)|zero overlap|no overlap",
-    re.IGNORECASE,
-)
+def _fact_text(text: str) -> str:
+    text = DATE_SPAN_RE.sub(lambda m: _canon_span(m.group()), text)
+    return re.sub(r"\s+", " ", text.translate(_TYPOGRAPHY)).strip().lower()
 
 
-def check_changelog_matches_diff(
-    changelog: list[str], changed_line_count: int
-) -> list[str]:
-    """Catch a changelog that claims edits the tailored resume does not contain.
+def _check_bound_facts(base: str, out: str) -> list[str]:
+    """Keep jobs in order with their own titles/dates, and freeze qualifications."""
+    def jobs(text):
+        records = []
+        for match in H3_RE.finditer(text):
+            body = re.split(r"^#{2,3}\s", text[match.end():], maxsplit=1, flags=re.MULTILINE)[0]
+            first = next((line.strip() for line in body.splitlines() if line.strip()), "")
+            role = first if re.fullmatch(r"\*\*(.+?)\*\*", first) else ""
+            records.append((_fact_text(match.group(1)), _fact_text(role),
+                            tuple(_canon_span(m.group()) for m in DATE_SPAN_RE.finditer(body))))
+        return records
 
-    This is the check that would have caught the whole-output-discard bug on the
-    first run: the model listed five concrete changes and the delivered file was
-    byte-identical to the original.
+    def qualifications(text):
+        sections = []
+        for match in H2_RE.finditer(text):
+            if re.search(r"educat|academic|certificat|credential|licen[sc]", match.group(1), re.I):
+                body = re.split(r"^##\s", text[match.end():], maxsplit=1, flags=re.MULTILINE)[0]
+                sections.append(_fact_text(body))
+        return sections
+
+    problems = []
+    if jobs(base) != jobs(out):
+        problems.append("A job's employer, title, dates, or order changed. Keep each job's facts together.")
+    if qualifications(base) != qualifications(out):
+        problems.append("Education or certifications changed. Do not add, remove, or rewrite qualifications.")
+    return problems
+
+
+def _quantities(text: str) -> list[str]:
+    """Find achievement quantities without mistaking OAuth 2.0 for an outcome.
+
+    A unit or scale marker distinguishes a metric from a product version/standard.
+    "11+ years" and "11 years" are the same claim. Named-history/date checks
+    protect historical fields independently.
     """
-    if not changelog:
-        return []
-    claims = [item for item in changelog if not NO_CHANGE_RE.search(item)]
-    # ponytail: crude ratio; a model listing 4 edits that touched 1 line is
-    # narrating work it did not do. Tighten to per-claim matching if it misfires.
-    if changed_line_count == 1 and len(claims) >= 3:
-        return [
-            f"The changelog lists {len(claims)} edits but only 1 line changed. "
-            "The changelog does not describe this file — do not trust it."
-        ]
-    if changed_line_count > 0:
-        return []
-    if not claims:
-        return []  # the model reported making no changes, and made none
-    return [
-        f"The changelog lists {len(changelog)} change(s) but the tailored resume "
-        "is identical to the original (0 lines changed). The edits were lost "
-        "somewhere in the pipeline — do not trust this run."
-    ]
+    number = r"(?<![\w.])\d[\d,]*(?:\.\d+)?"
+    units = (
+        r"ms|seconds?|minutes?|hours?|days?|weeks?|months?|years?|percent|x|"
+        r"[kmb]|thousand|million|billion|users?|customers?|clients?|records?|"
+        r"models?|engineers?|people|teams?|documents?|types?|requests?|events?|"
+        r"services?|pipelines?|endpoints?|jobs?|tests?|deployments?|transactions?|"
+        r"calls?|applications?|projects?|servers?|clusters?|regions?|databases?|"
+        r"terabytes?|gigabytes?|petabytes?|TB|GB|PB"
+    )
+    pattern = rf"[$€£]\s*{number}\s*(?:[kmb]\b|thousand\b|million\b|billion\b)?|{number}\s*\+?\s*(?:%|(?:{units})\b)|\b\d{{1,3}}(?:,\d{{3}})+\+?"
+    return [re.sub(r"[\s+]", "", m.group()).lower() for m in re.finditer(pattern, text, re.I)]
+
+
+def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
+    """Undo edits that add or drop a number in a role, or claim a new certification.
+
+    Each edited line is paired with the original it most resembles. A flagged
+    edit gets that original back, an added line is dropped, and a deleted
+    original that carried a number returns, so one bad line never costs the run.
+    ponytail: "Java 8 applications" reads as a new "8 applications" claim, so
+    such a rewrite keeps the original bullet. Exempt product versions if that bites.
+    """
+    original, edited = _scopes(base), _scopes(out)
+
+    def counts(items):
+        return Counter(_quantities("\n".join(line for _, line in items)))
+
+    # Numbers may move within a role; only a gain or loss for the role is undone.
+    added = {scope: counts(items) - counts(original.get(scope, [])) for scope, items in edited.items()}
+    lost = {scope: counts(items) - counts(edited.get(scope, [])) for scope, items in original.items()}
+    base_scope = {number: scope for scope, items in original.items() for number, _ in items}
+    out_scope = {number: scope for scope, items in edited.items() for number, _ in items}
+    numbers_moved = any(added.values()) or any(lost.values())
+    known = _known_credentials(base)
+    base_lines, out_lines = base.splitlines(), out.splitlines()
+
+    def numbers(text):
+        return Counter(_quantities(text))
+
+    def gained(j, i):
+        extra = numbers(out_lines[j]) - (numbers(base_lines[i]) if i is not None else Counter())
+        return extra & added.get(out_scope.get(j + 1), Counter())
+
+    def dropped(i, j):
+        missing = numbers(base_lines[i]) - (numbers(out_lines[j]) if j is not None else Counter())
+        return missing & lost.get(base_scope.get(i + 1), Counter())
+
+    matcher = difflib.SequenceMatcher(
+        a=[line.strip() for line in base_lines], b=[line.strip() for line in out_lines], autojunk=False
+    )
+    repaired: list[str] = []
+    undone: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            repaired.extend(out_lines[j1:j2])
+            continue
+        claims = any(_credential_claims(out_lines[j]) - known for j in range(j1, j2))
+        pairs = _pair_rewrites(base_lines, range(i1, i2), out_lines, range(j1, j2)) if numbers_moved or claims else {}
+        for j in range(j1, j2):
+            i = pairs.get(j)
+            if gained(j, i) or (i is not None and dropped(i, j)) or _credential_claims(out_lines[j]) - known:
+                undone.append(out_lines[j].strip())
+                if i is not None:
+                    repaired.append(base_lines[i])
+            else:
+                repaired.append(out_lines[j])
+        for i in sorted(set(range(i1, i2)) - set(pairs.values())):
+            if dropped(i, None):  # a deleted line that carried a number returns
+                undone.append(base_lines[i].strip())
+                repaired.append(base_lines[i])
+    return "\n".join(repaired) + ("\n" if out.endswith("\n") else ""), undone
+
+
+def _pair_rewrites(base_lines, base_range, out_lines, out_range) -> dict[int, int]:
+    """Pair each edited line with the original it most resembles, most similar first."""
+    scored = sorted(
+        ((difflib.SequenceMatcher(None, base_lines[i], out_lines[j]).ratio(), i, j)
+         for i in base_range for j in out_range),
+        reverse=True,
+    )
+    pairs: dict[int, int] = {}
+    used: set[int] = set()
+    for ratio, i, j in scored:
+        if ratio >= 0.35 and j not in pairs and i not in used:
+            pairs[j] = i
+            used.add(i)
+    rest_i = [i for i in base_range if i not in used]
+    rest_j = [j for j in out_range if j not in pairs]
+    if len(rest_i) == len(rest_j) == 1:  # one line rewritten beyond recognition
+        pairs[rest_j[0]] = rest_i[0]
+    return pairs
+
+
+_CERT_WORD_RE = re.compile(r"certified|certifications?", re.I)
+# Words that end a certification name: "AWS Certified Solutions Architect with Python".
+_NAME_STOP = frozenset("""a active an and are as at by current for from having in including is multiple of on or
+plus relevant that the to using valid various who with""".split())
+_DASHES = {"-", "\u2013", "\u2014"}
+
+
+def _is_name_word(token: str) -> bool:
+    return bool(re.match(r"[^\W\d]", token)) and token.lower() not in _NAME_STOP
+
+
+def _name_words(tokens) -> set[str]:
+    return {part for token in tokens for part in token.lower().strip(".").split("-")
+            if part and part not in _NAME_STOP}
+
+
+def _credential_claims(line: str) -> set[str]:
+    """Words naming each certification claimed on `line`, plus "*" when one is claimed.
+
+    Reads "AWS Certified Solutions Architect", "PMP certification", "CKA-certified",
+    "certified in Kubernetes", and "Certifications: AZ-900, CKA".
+    ponytail: word rules, not a certification list. Match a curated list if these misfire.
+    """
+    tokens = re.findall(r"[\w+#.-]+|[^\w\s]", line.strip().lstrip("-*#> "))
+    claims: set[str] = set()
+    for index, token in enumerate(tokens):
+        match = re.fullmatch(r"(?:([\w+#.]+)-)?(?:certified|certifications?)", token, re.I)
+        if not match:
+            continue
+        claims.add("*")
+        if match.group(1):  # "CKA-certified": the prefix is the name
+            claims |= _name_words([match.group(1)])
+            continue
+        before: list[str] = []
+        for position in range(index - 1, -1, -1):
+            token = tokens[position]
+            if token in _DASHES:
+                continue
+            if not _is_name_word(token) or len(before) == 3 or (position == 0 and token.istitle()):
+                break  # a sentence-initial verb ("Earned") names nothing
+            before.append(token)
+        claims |= _name_words(before)
+        rest = tokens[index + 1:]
+        if rest[:1] == [":"]:  # "Certifications: AZ-900, CKA"
+            claims |= _name_words(word for word in rest[1:] if _is_name_word(word))
+            continue
+        after: list[str] = []
+        for token in rest[1:] if rest[:1] and rest[0].lower() == "in" else rest:  # "certified in Kubernetes"
+            if token in _DASHES:
+                continue  # "Solutions Architect – Professional" names the level too
+            if not _is_name_word(token) or len(after) == 4:
+                break
+            after.append(token)
+        claims |= _name_words(after)
+    return claims
+
+
+def _known_credentials(text: str) -> set[str]:
+    """Every word on the base's certification lines, so a real one can be named anywhere."""
+    known: set[str] = set()
+    section = ""
+    for line in text.splitlines():
+        if line.startswith("## "):
+            section = line
+        if _CERT_WORD_RE.search(line) or re.search(r"certif|licen[sc]", section, re.I):
+            known |= _name_words(re.findall(r"[\w+#.-]+", line)) | {"*"}
+    return known
+
+
+def _scopes(text: str) -> dict[str, list[tuple[int, str]]]:
+    groups: dict[str, list[tuple[int, str]]] = {}
+    section = "Contact and headline"
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.startswith(("## ", "### ")):
+            section = _fact_text(line.lstrip("# "))
+        if line.strip():
+            groups.setdefault(section, []).append((number, line))
+    return groups
+
+
+def review_edits(base: str, out: str) -> list[dict]:
+    """Before/after text, aligned within a section or job, with source lines."""
+    original, edited = _scopes(base), _scopes(out)
+    items = []
+    for section in dict.fromkeys([*original, *edited]):
+        old, new = original.get(section, []), edited.get(section, [])
+        matcher = difflib.SequenceMatcher(a=[_fact_text(l) for _, l in old],
+                                         b=[_fact_text(l) for _, l in new], autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag != "equal":
+                items.append({"section": section,
+                              "source_lines": [n for n, _ in old[i1:i2]],
+                              "before": "\n".join(l for _, l in old[i1:i2]),
+                              "after": "\n".join(l for _, l in new[j1:j2])})
+    return items
 
 
 def unified_diff(base: str, tailored: str, *, fromfile: str, tofile: str) -> str:
@@ -330,12 +449,8 @@ def _canon_span(text: str) -> str:
     span = _norm_dashes(re.sub(r"\s+", " ", text).strip())
     span = re.sub(rf"({MONTH})[a-z]*", lambda m: m.group(1)[:3], span, flags=re.IGNORECASE)
     span = re.sub(r"\s*–\s*", "–", span)
+    span = re.sub(r"\b(?:current|now)\b", "Present", span, flags=re.I)
     return span.lower()
-
-
-def _canon_metric(text: str) -> str:
-    """Normalise a quantity so rephrasing is allowed but changing it is not."""
-    return re.sub(r"\s+", " ", text).replace("+", "").strip().lower()
 
 
 # A heading-less document must never be treated as one giant contact block.
@@ -395,21 +510,19 @@ def _restore_contact(base: str, out: str) -> tuple[str, bool]:
     out_lines = out_header.splitlines()
     boundary = _last_identity_line(base_lines)
 
-    # Same shape: restore only the identity lines, so a retargeted headline
-    # under the contact details is left alone.
-    if boundary >= 0 and len(base_lines) == len(out_lines):
-        merged = list(out_lines)
-        restored = False
-        for index in range(boundary + 1):
-            if base_lines[index].strip() != out_lines[index].strip():
-                merged[index] = base_lines[index]
-                restored = True
-        if not restored:
+    out_boundary = _last_identity_line(out_lines)
+    # Locate the contact boundary in each header independently. A new headline
+    # changes header length; that must not restore the entire old header.
+    if boundary >= 0 and out_boundary >= 0:
+        original_identity = base_lines[:boundary + 1]
+        current_identity = out_lines[:out_boundary + 1]
+        if original_identity == current_identity:
             return out, False
+        merged = original_identity + out_lines[out_boundary + 1:]
         trailing = out_header[len(out_header.rstrip("\n")) :]
         return "\n".join(merged) + trailing + out[len(out_header) :], True
 
-    # The header changed shape (lines added or removed): restore all of it.
+    # If the contact block was dropped entirely, restore it without touching body.
     return base_header + out[len(out_header) :], True
 
 
@@ -470,121 +583,16 @@ def _section_item_lines(text: str, heading_lname: str) -> tuple[str, ...]:
     return lines
 
 
-# Tool and technology names are shaped unlike ordinary prose: internal capitals
-# (GitOps, PySpark, LangGraph), short all-caps acronyms (AWS, EKS, RBAC), or a
-# digit/symbol (C++, Python3, S3). Matching on shape keeps false positives low.
-TECH_TOKEN_RE = re.compile(
-    r"\b(?:[A-Za-z]+[A-Z][A-Za-z0-9+#.]*|[A-Z]{2,8}|[A-Za-z]+[0-9]+[A-Za-z0-9+#]*)\b"
-)
-# Words that merely look like acronyms but carry no claim.
-TECH_STOPWORDS = frozenset(
-    """A I AI ML AND OR THE FOR WITH FROM INTO API APIS CI CD IT IS AS AT ON IN
-    TO BY OF US UK EU PHD BS BA MS MSC BSC MBA CV HR QA UX UI PM SME KPI ROI
-    SLA SOP EOD ASAP FAQ TBD N A""".split()
+# Only capitalised names count: "project: migrated the data lake" names nothing.
+NAMED_HISTORY_RE = re.compile(
+    r"\b(?i:client|project)\s*(?:(?i:named|called)|:)\s*[\"'“]?"
+    r"([A-Z][A-Za-z0-9&.+-]*(?:\s+[A-Z][A-Za-z0-9&.+-]*){0,3})"
 )
 
 
-def _technology_tokens(text: str) -> set[str]:
-    """Tokens shaped like a product name. High precision — safe to hard-fail on."""
-    return {
-        token.strip(".")
-        for token in TECH_TOKEN_RE.findall(text)
-        if token.upper() not in TECH_STOPWORDS and len(token) > 1
-    }
-
-
-def _skill_line_tokens(text: str) -> set[str]:
-    """Capitalised items listed on a "Label: value" line.
-
-    Every entry on a skills line is a claim, but many are ordinary words
-    ("Runbooks", "Alerting"), so a new one here is worth surfacing without
-    failing the run.
-    """
-    found: set[str] = set()
-    for raw in text.splitlines():
-        line = raw.strip().lstrip("-*# ").strip()
-        marker = line.find(": ")
-        if not 0 < marker < 60:
-            continue
-        for token in re.findall(r"\b[A-Z][A-Za-z0-9+#.-]*[A-Za-z0-9+#]\b", line[marker + 2 :]):
-            if token.upper() not in TECH_STOPWORDS:
-                found.add(token.strip("."))
-    return found
-
-
-def _stem(token: str) -> str:
-    """"SLO" and "SLOs" are one claim, not two."""
-    low = token.lower().strip(".")
-    return low[:-1] if len(low) > 3 and low.endswith("s") else low
-
-
-def _known_vocabulary(text: str) -> set[str]:
-    """Every capitalised or technology-shaped token in the base resume.
-
-    Deliberately a superset of what `_technology_tokens` extracts, so that a word
-    the base only ever uses in prose ("Application Insights" inside a bullet) is
-    not reported as invented when the model surfaces it on a skills line.
-    """
-    tokens = {_stem(token) for token in _technology_tokens(text)}
-    tokens |= {_stem(token) for token in _skill_line_tokens(text)}
-    # Every word in any case: "human-in-the-loop" in a bullet is evidence for
-    # "Human-in-the-Loop" on a skills line. Only capitalised words were learned
-    # before, so ordinary prose could not vouch for its own vocabulary.
-    tokens |= {_stem(word) for word in re.findall(r"[A-Za-z][A-Za-z0-9+#.-]*[A-Za-z0-9+#]", text)}
-    tokens |= {_stem(word) for word in re.findall(r"[A-Za-z][A-Za-z0-9+#.]{1,}", text)}
-    # Products get written both ways ("Llama Index" / "LlamaIndex"), and a
-    # respacing is not a new claim.
-    for pair in re.findall(r"\b([A-Z][A-Za-z0-9+#.]{1,})\s+([A-Z][A-Za-z0-9+#.]{1,})\b", text):
-        tokens.add(_stem(pair[0] + pair[1]))
-    return tokens
-
-
-def _line_has_offender(text: str, offenders: set[str]) -> bool:
-    low = text.lower()
-    if any(o in low for o in offenders):
-        return True
-    return any(_canon_metric(m) in offenders for m in METRIC_RE.findall(text))
-
-
-def _revert_lines_containing(
-    base: str, out: str, offenders: set[str]
-) -> tuple[str, list[tuple[str, str]]]:
-    """Replace each tailored line carrying an offender with its original line.
-
-    Lines are aligned in order; an offending line that replaced an original
-    gets the original back, an offending line the model inserted is dropped.
-    Returns the repaired text and (offender, line) pairs for the report.
-    """
-    base_lines, out_lines = base.splitlines(), out.splitlines()
-    matcher = difflib.SequenceMatcher(
-        a=[l.strip() for l in base_lines], b=[l.strip() for l in out_lines]
-    )
-    repaired: list[str] = []
-    reverted: list[tuple[str, str]] = []
-
-    def offender_in(line: str) -> str | None:
-        low = line.lower()
-        for o in sorted(offenders, key=len, reverse=True):
-            if o in low or any(_canon_metric(m) == o for m in METRIC_RE.findall(line)):
-                return o
-        return None
-
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            repaired.extend(out_lines[j1:j2])
-        elif tag == "delete":
-            continue  # the model removed these; a separate check counts removals
-        else:  # insert or replace
-            for k in range(j2 - j1):
-                line = out_lines[j1 + k]
-                hit = offender_in(line)
-                if hit is None:
-                    repaired.append(line)
-                    continue
-                reverted.append((hit, line.strip()))
-                if tag == "replace" and i1 + k < i2:
-                    repaired.append(base_lines[i1 + k])
-    return "\n".join(repaired) + ("\n" if out.endswith("\n") else ""), reverted
+def _named_history(text: str) -> set[str]:
+    """Named clients/projects are work history, even when the JD mentions them."""
+    return {match.group(1).lower().strip() for match in NAMED_HISTORY_RE.finditer(text)}
 
 
 def _fuzzy_present(value: str, originals: tuple[str, ...]) -> bool:
@@ -611,8 +619,8 @@ def _fuzzy_present(value: str, originals: tuple[str, ...]) -> bool:
 # an edit, and the Word writer ignores it — so the reported line count must too,
 # or the changelog claims changes the delivered file does not contain.
 _TYPOGRAPHY = str.maketrans({
-    "\u2019": "'", "\u2018": "'", "\u201c": '"', "\u201d": '"',
-    "\u2014": "\u2013", "\u00a0": " ",
+    "’": "'", "‘": "'", "“": '"', "”": '"',
+    "—": "–", " ": " ",
 })
 
 
@@ -622,36 +630,6 @@ def _content_lines(text: str) -> list[str]:
         for line in text.splitlines()
         if line.strip()
     ]
-
-
-def _added_content_lines(base: str, tailored: str) -> int:
-    """Content lines in the tailored resume with no counterpart in the base."""
-    matcher = difflib.SequenceMatcher(
-        a=_content_lines(base),
-        b=_content_lines(tailored),
-    )
-    added = 0
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "insert":
-            added += j2 - j1
-        elif tag == "replace":
-            added += max(0, (j2 - j1) - (i2 - i1))
-    return added
-
-
-def _removed_content_lines(base: str, tailored: str) -> int:
-    """Content lines present in the base that no longer have a counterpart."""
-    matcher = difflib.SequenceMatcher(
-        a=_content_lines(base),
-        b=_content_lines(tailored),
-    )
-    removed = 0
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "delete":
-            removed += i2 - i1
-        elif tag == "replace":
-            removed += max(0, (i2 - i1) - (j2 - j1))
-    return removed
 
 
 def _changed_content_lines(base: str, tailored: str) -> int:

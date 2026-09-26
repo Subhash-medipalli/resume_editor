@@ -31,7 +31,8 @@ MONTH = (
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
 )
 DATE_SPAN_RE = re.compile(
-    rf"{MONTH}\s+\d{{4}}\s*[–—-]\s*(?:Present|{MONTH}\s+\d{{4}})",
+    rf"(?:{MONTH}\s+\d{{4}}|(?:0?[1-9]|1[0-2])[/.-]\d{{4}}|\b\d{{4}})"
+    rf"\s*[–—-]\s*(?:Present|Current|Now|{MONTH}\s+\d{{4}}|(?:0?[1-9]|1[0-2])[/.-]\d{{4}}|\d{{4}})\b",
     re.IGNORECASE,
 )
 # "PROFESSIONAL SUMMARY:" — an all-caps line, colon optional.
@@ -78,7 +79,7 @@ def _is_bullet_style(style: str) -> bool:
     return "list" in (style or "").lower()
 
 
-def _is_section(text: str, style: str) -> bool:
+def _is_section(text: str, style: str, after_job: bool = False) -> bool:
     if _is_bullet_style(style):
         return False
     stripped = text.strip()
@@ -89,7 +90,9 @@ def _is_section(text: str, style: str) -> bool:
     letters = [c for c in stripped if c.isalpha()]
     if not letters:
         return False
-    if not (all(c.isupper() for c in letters) and SECTION_RE.match(stripped)):
+    # A Heading-styled line right under a job heading is that job's title.
+    heading_style = style.lower().startswith("heading") and not after_job
+    if not (heading_style or (all(c.isupper() for c in letters) and SECTION_RE.match(stripped))):
         return False
     words = re.findall(r"[A-Za-z]+", stripped.lower())
     return any(word in SECTION_WORDS for word in words)
@@ -117,7 +120,7 @@ def parse_paragraphs(entries: list[tuple[str, str]]) -> list[Block]:
         if index == 0:
             # The first line is the candidate's name, even in capitals.
             kind = NAME
-        elif _is_section(text, style):
+        elif _is_section(text, style, after_job=previous_kind == JOB):
             kind = SECTION
             seen_section = True
         elif _is_job_heading(text):
@@ -215,13 +218,3 @@ def from_markdown(markdown: str) -> list[Block]:
 
     return blocks
 
-
-def header_block_length(blocks: list[Block]) -> int:
-    """How many leading blocks form the contact header (name/contact/tagline)."""
-    count = 0
-    for block in blocks:
-        if block.kind in (NAME, CONTACT, TAGLINE):
-            count += 1
-        else:
-            break
-    return count

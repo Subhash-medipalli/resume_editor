@@ -88,3 +88,13 @@ def test_an_all_caps_employer_is_not_a_section():
     ])
     assert [b.kind for b in blocks].count(SECTION) == 1
     assert blocks[3].kind != SECTION
+
+
+def test_heading_styled_job_title_is_a_title_not_a_section():
+    from resume_tailor.structure import parse_paragraphs
+    blocks = parse_paragraphs([
+        ("Sample Candidate", "Normal"), ("sample@example.invalid", "Normal"), ("Experience", "Heading 1"),
+        ("Example Co | 2020 – Present", "Normal"), ("Technical Lead", "Heading 2"),
+        ("Built things.", "List Bullet"), ("Education", "Heading 1"),
+    ])
+    assert [block.kind for block in blocks[3:]] == ["job", "title", "bullet", "section"]
