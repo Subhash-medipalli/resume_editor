@@ -25,6 +25,8 @@ ROOT = Path.cwd()
 # ponytail: one active provider run for this local app; return busy instead of
 # silently queuing. Use a bounded queue if concurrent users become necessary.
 _TAILOR_LOCK = threading.Lock()
+# Readers must not see completion until the server can accept another run.
+_RUN_STATUS_LOCK = threading.Lock()
 _ACTIVE_RUN_ID: str | None = None
 
 # A job description is text. Anything this large is not one.
@@ -307,6 +309,7 @@ def _finish_run(
     two_pass: bool = False,
 ) -> None:
     global _ACTIVE_RUN_ID
+    status = None
     try:
         try:
             result = _execute_run(jd, snapshot, run_dir, two_pass=two_pass)
@@ -314,24 +317,30 @@ def _finish_run(
             result = {"ok": False, "error": str(exc), "download": None, "run_id": run_dir.name}
         result["resume_id"] = resume_id
         result["run_id"] = run_dir.name
-        write_text(run_dir / "status.json", json.dumps({"state": "complete", "result": result}))
+        status = json.dumps({"state": "complete", "result": result})
     finally:
-        _ACTIVE_RUN_ID = None
-        _TAILOR_LOCK.release()
+        with _RUN_STATUS_LOCK:
+            try:
+                if status is not None:
+                    write_text(run_dir / "status.json", status)
+            finally:
+                _ACTIVE_RUN_ID = None
+                _TAILOR_LOCK.release()
 
 
 def _read_run_status(run_id: str) -> dict:
     if not re.fullmatch(r"[0-9a-f]{32}", run_id):
         raise ValueError("Unknown run.")
-    status = json.loads((ROOT / "out/runs" / run_id / "status.json").read_text(encoding="utf-8"))
-    if not isinstance(status, dict):
-        raise ValueError("Invalid run status.")
-    if status.get("state") == "working" and run_id != _ACTIVE_RUN_ID:
-        return {"state": "complete", "result": {
-            "ok": False, "download": None, "run_id": run_id,
-            "error": "This run was interrupted. Start a new tailoring run.",
-        }}
-    return status
+    with _RUN_STATUS_LOCK:
+        status = json.loads((ROOT / "out/runs" / run_id / "status.json").read_text(encoding="utf-8"))
+        if not isinstance(status, dict):
+            raise ValueError("Invalid run status.")
+        if status.get("state") == "working" and run_id != _ACTIVE_RUN_ID:
+            return {"state": "complete", "result": {
+                "ok": False, "download": None, "run_id": run_id,
+                "error": "This run was interrupted. Start a new tailoring run.",
+            }}
+        return status
 
 
 def _read_result(run_id: str) -> tuple[dict, bytes]:

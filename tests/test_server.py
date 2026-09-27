@@ -381,6 +381,41 @@ def test_library_selection_validates_saved_word_bytes(api, monkeypatch, tmp_path
     assert len(list((tmp_path / "out/runs").iterdir())) == 1
 
 
+@pytest.mark.parametrize("provider_fails", [False, True])
+def test_completed_status_waits_until_server_is_ready(api, monkeypatch, provider_fails):
+    published, release = threading.Event(), threading.Event()
+    write_text = server.write_text
+
+    def pause_after_publication(path, text, **kwargs):
+        write_text(path, text, **kwargs)
+        if path.name == "status.json" and json.loads(text).get("state") == "complete":
+            published.set()
+            assert release.wait(5)
+
+    monkeypatch.setattr(server, "write_text", pause_after_publication)
+    if provider_fails:
+        def fail_provider(*args, **kwargs):
+            raise LLMError("provider failed")
+        monkeypatch.setattr(server, "complete", fail_provider)
+
+    status, started = api.raw("POST", "/api/tailor", with_resume({"jd": "Python"}))
+    assert status == 202
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            assert published.wait(5)
+            reading = pool.submit(api.raw, "GET", started["status"])
+            # A completed result must not be visible while the run is still busy.
+            with pytest.raises(TimeoutError):
+                reading.result(timeout=0.1)
+        finally:
+            release.set()
+        status, progress = reading.result(timeout=5)
+    assert status == 200 and progress["state"] == "complete"
+    assert progress["result"]["ok"] is not provider_fails
+    status, next_run = api("POST", "/api/tailor", {"jd": "Python", "resume_id": started["resume_id"]})
+    assert status == 200 and next_run["ok"] is not provider_fails
+
+
 def test_history_download_links_still_verify_the_requested_artifact(api, tmp_path):
     _, result = api("POST", "/api/tailor", {"jd": "Python"})
     _, history = api("GET", "/api/runs")
