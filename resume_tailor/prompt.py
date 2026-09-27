@@ -41,6 +41,12 @@ MATCH-FIRST RULES:
    a recruiter would believe. Keep existing phrasing that already fits the job and change
    what the job needs. Avoid buzzwords such as "proven track record", "deep expertise",
    "results-driven", "seasoned", "cutting-edge", "spearheaded", or "specialist".
+9. Keep the career timeline believable instead of repeating one stack in every role.
+   Put the job's main platform (for example AWS) in the most recent role. In the role
+   before it, use a comparable alternative (for example Azure when the job asks for AWS,
+   or AWS when it asks for Azure). In older roles keep the role's own tools and era, and
+   do not add the job's main platform there. Never name a tool or service in a role that
+   ended before that tool was released.
 
 OUTPUT FORMAT — follow exactly. No extra commentary before or after:
 ===CHANGELOG===
