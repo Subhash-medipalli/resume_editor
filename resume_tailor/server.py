@@ -540,7 +540,10 @@ def serve(host: str = "127.0.0.1", port: int = 8787) -> None:
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("This local app must bind to 127.0.0.1 or localhost.")
     load_dotenv(ROOT / ".env")
-    httpd = ThreadingHTTPServer((host, port), Handler)
-    print(f"Resume tailor UI: http://{host}:{port}")
-    print("Paste a job description in the browser. Ctrl-C to stop.")
-    httpd.serve_forever()
+    with ThreadingHTTPServer((host, port), Handler) as httpd:
+        print(f"Resume tailor UI: http://{host}:{httpd.server_port}")
+        print("Paste a job description in the browser. Ctrl-C to stop.")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nResume tailor stopped.")
