@@ -296,6 +296,24 @@ def test_remote_server_binding_is_rejected():
         server.serve(host="0.0.0.0")
 
 
+def test_ctrl_c_stops_cli_cleanly_and_releases_the_listening_port(monkeypatch, capsys):
+    from resume_tailor.cli import main
+
+    stopped = []
+    def interrupt(httpd):
+        stopped.append(httpd)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ThreadingHTTPServer, "serve_forever", interrupt)
+    assert main(["--serve", "--port", "0"]) == 0
+    output = capsys.readouterr()
+    assert "Resume tailor stopped." in output.out
+    assert "KeyboardInterrupt" not in output.err
+    assert stopped[0].socket.fileno() == -1
+    with ThreadingHTTPServer(stopped[0].server_address, server.Handler):
+        pass  # A restart can immediately use the same port.
+
+
 def test_model_echo_never_creates_a_successful_download(api, monkeypatch, tmp_path):
     calls = []
     def echo(messages, **kwargs):

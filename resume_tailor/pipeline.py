@@ -34,6 +34,7 @@ build design develop implement collaborate maintain support create ensure partic
 manage drive own write deliver partner mentor help join strong excellent good great solid
 orchestrate ingest monitor automate optimize migrate deploy integrate troubleshoot document
 coordinate analyze review define establish improve communicate translate
+keep bachelor bachelors master masters degree certification certifications certificate mis
 proven deep hands working comfortable familiar familiarity knowledge understanding ability
 able responsible
 w2 c2c c2h 1099 h1b h1 gc ead usc opt cpt visa citizen citizens usa united states us uk eu

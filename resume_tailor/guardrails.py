@@ -6,7 +6,7 @@ import difflib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from resume_tailor.structure import CONTACT_MARKER_RE, DATE_SPAN_RE, JOB, SECTION, TITLE, from_markdown
+from resume_tailor.structure import CONTACT_MARKER_RE, DATE_SPAN_RE, JOB, SECTION, TEXT, TITLE, from_markdown
 
 MONTH = (
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
@@ -91,8 +91,8 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     out, undone = _repair_lines(base_n, out)
     for line in undone:
         report.warnings.append(
-            "Kept your original line because the edit changed a number or added a "
-            f"degree/certification claim: “{line[:70]}…”"
+            "Kept your original line because the edit changed a number, added a "
+            f"degree/certification claim, or named a tool released after that role ended: “{line[:70]}…”"
         )
 
     out_facts = extract_facts(out)
@@ -254,7 +254,7 @@ def _quantities(text: str) -> list[str]:
 
 
 def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
-    """Undo edits that change a role's numbers or add a degree/certification claim.
+    """Undo changed numbers, new qualifications, and tools newer than a role.
 
     Each edited line is paired with the original it most resembles. A flagged
     edit gets that original back, an added line is dropped, and a deleted
@@ -291,6 +291,19 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
         return _has_unknown_credential(out_lines[j], known) or (
             j not in qualification_lines and bool(_degree_levels(out_lines[j]) - degrees))
 
+    role_ends = {scope: _role_end_year("\n".join(line for _, line in items))
+                 for scope, items in original.items()}
+    role_tools = {scope: _tools("\n".join(line for _, line in items))
+                  for scope, items in original.items() if role_ends[scope] is not None}
+
+    def too_new(j):
+        """Tools on edited line j released after its role ended, unless the original role named them."""
+        scope = out_scope.get(j + 1)
+        end = role_ends.get(scope)
+        if end is None:
+            return set()
+        return {tool for tool in _tools(out_lines[j]) - role_tools[scope] if _TOOL_RELEASE_YEAR[tool] > end}
+
     def numbers(text):
         return Counter(_quantities(text))
 
@@ -303,7 +316,9 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
         return missing & lost.get(base_scope.get(i + 1), Counter())
 
     matcher = difflib.SequenceMatcher(
-        a=[line.strip() for line in base_lines], b=[line.strip() for line in out_lines], autojunk=False
+        a=[(base_scope.get(i + 1), line.strip()) for i, line in enumerate(base_lines)],
+        b=[(out_scope.get(j + 1), line.strip()) for j, line in enumerate(out_lines)],
+        autojunk=False,
     )
     repaired: list[str] = []
     undone: list[str] = []
@@ -311,11 +326,18 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
         if tag == "equal":
             repaired.extend(out_lines[j1:j2])
             continue
-        claims = any(new_claim(j) for j in range(j1, j2))
-        pairs = _pair_rewrites(base_lines, range(i1, i2), out_lines, range(j1, j2)) if numbers_moved or claims else {}
+        claims = any(new_claim(j) or too_new(j) for j in range(j1, j2))
+        pairs = {}
+        if numbers_moved or claims:
+            # An identical bullet moved to a different role is still an edit.
+            # Pair only within that role, including the single-line fallback.
+            for scope in dict.fromkeys(out_scope.get(j + 1) for j in range(j1, j2)):
+                old = [i for i in range(i1, i2) if base_scope.get(i + 1) == scope]
+                new = [j for j in range(j1, j2) if out_scope.get(j + 1) == scope]
+                pairs.update(_pair_rewrites(base_lines, old, out_lines, new))
         for j in range(j1, j2):
             i = pairs.get(j)
-            if gained(j, i) or (i is not None and dropped(i, j)) or new_claim(j):
+            if gained(j, i) or (i is not None and dropped(i, j)) or new_claim(j) or too_new(j):
                 undone.append(out_lines[j].strip())
                 if i is not None:
                     repaired.append(base_lines[i])
@@ -326,6 +348,64 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
                 undone.append(base_lines[i].strip())
                 repaired.append(base_lines[i])
     return "\n".join(repaired) + ("\n" if out.endswith("\n") else ""), undone
+
+
+# Earliest public preview/open release, not company founding or private development.
+# Sources and audit limits: docs/tool-release-years.md. ponytail: a hand-kept list;
+# add a sourced tool when a model back-dates one that is missing.
+_TOOL_RELEASE_YEAR = {
+    # AWS
+    "EMR": 2009, "RDS": 2009, "CloudFormation": 2011, "DynamoDB": 2012, "Redshift": 2012,
+    "Kinesis": 2013, "Lambda": 2014, "Aurora": 2014, "KMS": 2014, "ECS": 2014,
+    "API Gateway": 2015, "QuickSight": 2015, "Glue": 2017, "Athena": 2016, "Step Functions": 2016,
+    "SageMaker": 2017, "EKS": 2017, "Fargate": 2017, "Secrets Manager": 2018, "Lake Formation": 2018,
+    "MSK": 2018, "EventBridge": 2019, "OpenSearch": 2021, "Bedrock": 2023,
+    # Azure
+    "HDInsight": 2012, "Azure Data Factory": 2014, "Event Hubs": 2014, "ADLS": 2015,
+    "Azure Functions": 2016, "Cosmos DB": 2017, "Azure Databricks": 2017, "AKS": 2017,
+    "Azure DevOps": 2018, "Synapse": 2019, "Azure OpenAI": 2021, "Microsoft Fabric": 2023,
+    "Azure AI Foundry": 2024,
+    # Google Cloud
+    "BigQuery": 2010, "Dataproc": 2015, "Cloud Composer": 2018, "Vertex AI": 2021,
+    # Data platforms
+    "Kafka": 2011, "Spark": 2010, "PySpark": 2013, "Presto": 2013, "Databricks": 2014,
+    "Snowflake": 2014, "Flink": 2014, "NiFi": 2014, "Airflow": 2015, "dbt": 2016, "Hudi": 2017,
+    "Iceberg": 2017, "Delta Lake": 2018, "Great Expectations": 2017, "Trino": 2020,
+    "Snowpark": 2021, "Airbyte": 2020, "Unity Catalog": 2022, "Delta Live Tables": 2021,
+    "Databricks Genie": 2024, "Agent Bricks": 2025,
+    # DevOps
+    "Docker": 2013, "Kubernetes": 2014, "Terraform": 2014, "GitHub Actions": 2018,
+    # ML and AI
+    "TensorFlow": 2015, "PyTorch": 2017, "FAISS": 2017, "MLflow": 2018, "Pinecone": 2021,
+    "RAG": 2020, "ChatGPT": 2022, "LangChain": 2022, "LlamaIndex": 2022, "GPT-4": 2023,
+    "CrewAI": 2023, "AutoGen": 2023, "LangGraph": 2024, "Model Context Protocol": 2024,
+}
+_TOOL_RE = re.compile(
+    r"(?<!\w)(" + "|".join(sorted(map(re.escape, _TOOL_RELEASE_YEAR), key=len, reverse=True)) + r")(?!\w)"
+)
+
+
+def _tools(text: str) -> set[str]:
+    return set(_TOOL_RE.findall(text))
+
+
+def _role_end_year(markdown: str) -> int | None:
+    """Read original job metadata, never a section heading or dates in a bullet."""
+    blocks = from_markdown(markdown)
+    if not blocks or blocks[0].kind != JOB:
+        return None
+    for block in blocks:
+        if block.kind not in (JOB, TITLE, TEXT):
+            break
+        text = block.text.strip("* ")
+        span = DATE_SPAN_RE.search(text) if block.kind == JOB else DATE_SPAN_RE.match(text)
+        if span:
+            if re.search(r"present|current|now", span.group(), re.I):
+                return None
+            return int(re.findall(r"\d{4}", span.group())[-1])
+        if block.kind not in (JOB, TITLE):
+            break
+    return None
 
 
 def _pair_rewrites(base_lines, base_range, out_lines, out_range) -> dict[int, int]:
@@ -470,11 +550,15 @@ def _degree_levels(text: str) -> set[str]:
 def _scopes(text: str) -> dict[str, list[tuple[int, str]]]:
     groups: dict[str, list[tuple[int, str]]] = {}
     section = "Contact and headline"
-    for number, line in enumerate(text.splitlines(), 1):
-        if line.startswith(("## ", "### ")):
-            section = _fact_text(line.lstrip("# "))
-        if line.strip():
-            groups.setdefault(section, []).append((number, line))
+    role = 0
+    lines = [(number, line) for number, line in enumerate(text.splitlines(), 1) if line.strip()]
+    for (number, line), block in zip(lines, from_markdown(text)):
+        if block.kind == SECTION:
+            section = _fact_text(block.text)
+        elif block.kind == JOB:
+            role += 1
+            section = f"Role {role}: {_fact_text(block.text)}"
+        groups.setdefault(section, []).append((number, line))
     return groups
 
 

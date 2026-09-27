@@ -453,3 +453,25 @@ def test_rewriting_cannot_leave_a_summary_heading_with_no_content():
     _, report = apply_guardrails(PIPE_RESUME, tailored)
     assert not report.ok
     assert any("content was emptied" in v for v in report.violations)
+
+
+def test_tool_released_after_a_role_ended_keeps_the_original_line():
+    tailored = PIPE_RESUME.replace("- More fiction. SAMPLE only.", "- Built LangGraph agents for claims triage.")
+    fixed, report = apply_guardrails(PIPE_RESUME, tailored)
+    assert report.ok, report.violations
+    assert "LangGraph" not in fixed and "- More fiction. SAMPLE only." in fixed
+    assert any("released after that role ended" in warning for warning in report.warnings)
+
+
+def test_new_tool_in_the_current_role_is_kept():
+    tailored = PIPE_RESUME.replace("- Built fictional Python services. No real employer.",
+                                   "- Built LangGraph agents with fictional Python services.")
+    fixed, report = apply_guardrails(PIPE_RESUME, tailored)
+    assert report.ok and fixed == tailored
+
+
+def test_tool_the_original_role_already_names_is_kept():
+    base = PIPE_RESUME.replace("- More fiction. SAMPLE only.", "- Prototyped LangGraph agents.")
+    tailored = base.replace("- Prototyped LangGraph agents.", "- Prototyped LangGraph agents for claims triage.")
+    fixed, report = apply_guardrails(base, tailored)
+    assert report.ok and fixed == tailored

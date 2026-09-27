@@ -57,3 +57,10 @@ def test_parser_removes_reasoning_and_resume_only_fence():
                             resume="```markdown\n# Test\nPython developer\n```")
     result = parse_model_output("<think>Private drafting text</think>\n" + raw)
     assert result.resume_markdown == "# Test\nPython developer\n"
+
+
+def test_system_prompt_spreads_platforms_across_the_timeline():
+    from resume_tailor.prompt import SYSTEM_PROMPT
+    text = SYSTEM_PROMPT.lower()
+    assert "most recent role" in text and "comparable alternative" in text
+    assert "ended before that tool was released" in text
