@@ -21,7 +21,12 @@ MATCH-FIRST RULES:
 3. Make substantive changes wherever needed across existing roles. There is no
    changed-line or section budget. Keep each role distinct, reduce repetition, and
    connect the tools to the work instead of pasting a list of JD keywords everywhere.
-   Preserve useful detail and comparable overall length; do not return an unchanged
+   Preserve at least the original number of bullets in each role and in the summary.
+   Replace points one-for-one; do not merge or delete them to reduce repetition.
+   Keep useful implementation detail and comparable depth in the replacement points.
+   Retain every existing skill in the skills section; reorder or regroup them and add
+   relevant JD skills without duplicates. Do not shrink the skills inventory.
+   Do not return an unchanged
    resume, a lightly relabeled copy, a shortened skeleton, or placeholder text.
 4. Never invent employers, dates, historical job titles, education, certifications,
    licenses, named clients, or named projects. Keep each employer with its original
@@ -71,7 +76,8 @@ def build_user_prompt(
     if polish:
         notes += (
             "This resume was already tailored to this job. Polish it: improve flow, "
-            "remove repetition, and sharpen the job-specific wording.\n"
+            "vary repetitive wording, and sharpen the job-specific wording. Keep every existing "
+            "skill and at least the current number of bullets in each role and summary.\n"
         )
     if missing_keywords:
         notes += (

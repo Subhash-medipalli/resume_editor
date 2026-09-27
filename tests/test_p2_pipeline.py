@@ -230,7 +230,9 @@ def test_polish_losing_one_of_many_keywords_keeps_the_first_pass(tmp_path):
     source = tmp_path / "base.md"
     source.write_text(SAMPLE_RESUME)
     tools = [f"Tool{n}" for n in range(1, 201)]
-    first = lightly_tailored(SAMPLE_RESUME).replace("- Data: PostgreSQL, Redis", "- Data: PostgreSQL, Redis\n- Tools: " + ", ".join(tools))
+    first = lightly_tailored(SAMPLE_RESUME).replace(
+        "Prefers clear scope and short feedback loops.", "Works with " + ", ".join(tools) + "."
+    )
     polished = first.replace(", Tool200", "").replace("Python REST APIs", "reliable Python REST APIs")
     replies = iter([pack_model_output(changelog=["Added tools"], match="good: first", resume=first),
                     pack_model_output(changelog=["Polished"], match="good: polish", resume=polished)])
@@ -263,8 +265,10 @@ def test_sample_jd_keywords_are_skills_not_boilerplate():
 def test_polish_that_drops_job_keywords_keeps_the_first_pass(tmp_path):
     source = tmp_path / "base.md"
     source.write_text(SAMPLE_RESUME)
-    first = lightly_tailored(SAMPLE_RESUME).replace("- Data: PostgreSQL, Redis", "- Data: PostgreSQL, Redis, Kafka")
-    polished = first.replace("Redis, Kafka", "Redis").replace("Python REST APIs", "reliable Python REST APIs")
+    first = lightly_tailored(SAMPLE_RESUME).replace(
+        "Prefers clear scope and short feedback loops.", "Works with Kafka."
+    )
+    polished = first.replace("Works with Kafka.", "Works with event queues.").replace("Python REST APIs", "reliable Python REST APIs")
     replies = iter([pack_model_output(changelog=["Added Kafka"], match="good: first", resume=first),
                     pack_model_output(changelog=["Polished"], match="good: polish", resume=polished)])
     result = run_tailoring(job_description="Required: Python, Kafka", resume_path=source, out_dir=tmp_path / "run",
@@ -279,10 +283,12 @@ def test_polish_that_drops_job_keywords_keeps_the_first_pass(tmp_path):
 def test_polish_cannot_trade_a_matched_keyword_for_new_keywords(tmp_path, replacement):
     source = tmp_path / "base.md"
     source.write_text(SAMPLE_RESUME)
-    first = lightly_tailored(SAMPLE_RESUME).replace("- Data: PostgreSQL, Redis", "- Data: PostgreSQL, Redis, Kafka")
-    polished = first.replace("Redis, Kafka", f"Redis, {replacement}")
+    first = lightly_tailored(SAMPLE_RESUME).replace(
+        "Prefers clear scope and short feedback loops.", "Works with Kafka."
+    )
+    polished = first.replace("Works with Kafka.", f"Works with {replacement}.")
     replies = iter([pack_model_output(changelog=["Added Kafka"], match="good: first", resume=first),
-                    pack_model_output(changelog=["Polished skills"], match="good: polish", resume=polished)])
+                    pack_model_output(changelog=["Polished summary"], match="good: polish", resume=polished)])
     result = run_tailoring(job_description="Required: Python, Kafka, RabbitMQ, Pulsar",
                            resume_path=source, out_dir=tmp_path / "run",
                            api_key="fake", base_url="https://example.invalid", model="test",

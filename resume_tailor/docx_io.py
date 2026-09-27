@@ -391,6 +391,14 @@ def write_tailored_docx(parent: Path, tailored_text: str, dest: Path) -> Path:
             ) or anchor
             cursor[index] = _clone_paragraph_after(anchor, template, new_block.text)
 
+    # Old manual page starts leave gaps when tailored content becomes shorter.
+    # Remove only empty page-break spacers; ordinary spacing and section breaks stay.
+    for paragraph in list(iter_paragraphs(document)):
+        if (not paragraph.text.strip()
+                and paragraph._p.xpath(".//w:br[@w:type='page']")
+                and not paragraph._p.xpath(".//w:sectPr | .//w:drawing | .//w:pict")):
+            _delete_paragraph(paragraph)
+
     # Keep section/employer/title chains with the first content paragraph.
     # Carry this through spacer paragraphs too; templates often use blank lines.
     final_blocks, final_paragraphs = document_blocks(document)

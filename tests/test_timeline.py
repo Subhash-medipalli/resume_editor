@@ -59,8 +59,8 @@ def test_role_timeline_is_checked_for_supported_heading_shapes(heading):
 
 
 def test_dates_in_a_non_job_section_do_not_restrict_its_tools():
-    base = PIPE_RESUME + "\n## Skills 2020 – 2023\n- Python services.\n"
-    draft = base.replace("- Python services.", "- Python and LangGraph services.")
+    base = PIPE_RESUME + "\n## Skills 2020 – 2023\n- Python\n"
+    draft = base.replace("- Python\n", "- Python, LangGraph\n")
     fixed, report = apply_guardrails(base, draft)
     assert report.ok and fixed == draft
     assert not report.warnings
@@ -119,12 +119,13 @@ def test_unchanged_bullets_copied_or_moved_into_an_older_role_are_checked(move):
         "analytics", "reporting", "marketing",
     ))
     base = PIPE_RESUME.replace(CURRENT_BULLET, bullets)
-    draft = base.replace(bullets, "- Built Python services.") if move else base
+    replacements = bullets.replace("LangGraph agents", "Python services")
+    draft = base.replace(bullets, replacements) if move else base
     draft = draft.replace(OLD_BULLET, OLD_BULLET + "\n" + bullets)
     fixed, report = apply_guardrails(base, draft)
     assert report.ok, report.violations
     assert "LangGraph" not in fixed.split(OLD_HEADING)[1]
-    assert ("- Built Python services." if move else bullets) in fixed
+    assert (replacements if move else bullets) in fixed
     assert OLD_BULLET in fixed
     assert report.warnings
 

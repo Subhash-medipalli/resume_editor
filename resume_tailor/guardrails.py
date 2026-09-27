@@ -6,7 +6,7 @@ import difflib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from resume_tailor.structure import CONTACT_MARKER_RE, DATE_SPAN_RE, JOB, SECTION, TEXT, TITLE, from_markdown
+from resume_tailor.structure import BULLET, CONTACT_MARKER_RE, DATE_SPAN_RE, JOB, SECTION, TEXT, TITLE, from_markdown
 
 MONTH = (
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
@@ -73,7 +73,8 @@ def extract_facts(markdown: str) -> ProtectedFacts:
 def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
     """Protect identity, work history, qualifications, and numbers.
 
-    Skills and wording may change freely. A line that changes a number or claims
+    Wording may change freely; preserve bullet depth and expand existing skills.
+    A line that changes a number or claims
     a new degree/certification gets its original back instead of failing the run.
     """
     report = GuardrailReport(ok=True)
@@ -180,10 +181,76 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
             report.violations.append(
                 f"Numbers or units changed in {section}. Preserve metrics with their original role or section."
             )
+    report.violations.extend(content_preservation_issues(base_n, out))
     report.ok = not report.violations
     if not out.endswith("\n"):
         out += "\n"
     return out, report
+
+
+def content_preservation_issues(base: str, draft: str) -> list[str]:
+    """Keep resume depth and existing skills while allowing complete JD rewrites."""
+    original, edited = _scopes(base), _scopes(draft)
+    problems = []
+
+    def blocks(items):
+        return from_markdown("\n".join(line for _, line in items))
+
+    for scope, items in original.items():
+        old = blocks(items)
+        heading = old[0] if old else None
+        if not heading or not (heading.kind == JOB or (
+            heading.kind == SECTION and re.search(r"\b(?:summary|profile|objective)\b", heading.text, re.I)
+        )):
+            continue
+        required = sum(block.kind == BULLET for block in old)
+        actual = sum(block.kind == BULLET for block in blocks(edited.get(scope, [])))
+        if actual < required:
+            problems.append(
+                f"Bullet count dropped in {scope}: expected at least {required}, found {actual}. "
+                "Rewrite the existing points instead of removing or combining them."
+            )
+
+    def skill_lines(scopes):
+        for items in scopes.values():
+            parsed = blocks(items)
+            if parsed and parsed[0].kind == SECTION and re.search(
+                r"\b(?:skills?|competenc\w*|expertise|proficienc\w*)\b|\b(?:technical|technology|tech) stack\b",
+                parsed[0].text, re.I,
+            ):
+                yield from (block.text for block in parsed[1:])
+
+    # ponytail: explicit skill lists, not semantic aliases; preserve original names.
+    # Parentheses split grouped tools such as AWS (EC2, S3), without losing AWS.
+    existing = {}
+    category_words = set("""programming scripting processing languages tools technologies
+        technology technical skills services platforms cloud data databases analytics
+        engineering architecture quality operations devops development frameworks
+        libraries competencies expertise governance and & /""".split())
+    for line in skill_lines(original):
+        label, separator, values = line.partition(":")
+        if separator:
+            # Keep tool names used as labels (AWS, SQL Server), not generic categories.
+            label_words = label.split()
+            while label_words and label_words[0].casefold() in category_words:
+                label_words.pop(0)
+            while label_words and label_words[-1].casefold() in category_words:
+                label_words.pop()
+            values = ", ".join([" ".join(label_words), values])
+        else:
+            values = label
+        for item in re.split(r"[,;()\n]|\s+[|/•]\s+", values):
+            item = re.sub(r"^(?:and|or|&)\s+", "", item.strip(), flags=re.I).strip(" .")
+            key = re.sub(r"\s+", " ", item.translate(_TYPOGRAPHY)).casefold()
+            if key:
+                existing.setdefault(key, item)
+    available = re.sub(r"\s+", " ", "\n".join(skill_lines(edited)).translate(_TYPOGRAPHY)).casefold()
+    missing = [label for key, label in existing.items()
+               if not re.search(rf"(?<![\w+#]){re.escape(key)}(?![\w+#])", available)]
+    if missing:
+        problems.append("Existing skills were removed from the skills sections: " + ", ".join(missing)
+                        + ". Preserve them while adding job-relevant skills.")
+    return problems
 
 
 def _fact_text(text: str) -> str:
