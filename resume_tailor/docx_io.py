@@ -32,11 +32,7 @@ MIN_REWRITE_RATIO = 0.35
 
 
 def find_parent_docx(root: Path) -> Path | None:
-    """Return a non-tailored .docx under resume/, if a caller left one there.
-
-    Tailoring does not use this as a default. Pass an explicit resume. The
-    lookup only supports a legacy markdown file that sits beside a Word export.
-    """
+    """The first Word resume in resume/ (that folder is never committed)."""
     resume_dir = root / "resume"
     if not resume_dir.is_dir():
         return None
@@ -133,12 +129,6 @@ def extract_blocks(path: Path) -> list[Block]:
 def extract_markdown(path: Path) -> str:
     """The structured markdown handed to the model and to the guardrails."""
     return to_markdown(extract_blocks(path))
-
-
-def extract_text(path: Path) -> str:
-    """Flat text of the document. Kept for callers that only need the words."""
-    document = Document(str(path))
-    return "\n".join(p.text for p in nonempty_paragraphs(document))
 
 
 def _has_hyperlink(paragraph: Paragraph) -> bool:
@@ -400,6 +390,28 @@ def write_tailored_docx(parent: Path, tailored_text: str, dest: Path) -> Path:
                 new_block.kind, index, base_blocks, paragraphs
             ) or anchor
             cursor[index] = _clone_paragraph_after(anchor, template, new_block.text)
+
+    # Keep section/employer/title chains with the first content paragraph.
+    # Carry this through spacer paragraphs too; templates often use blank lines.
+    final_blocks, final_paragraphs = document_blocks(document)
+    headings = {
+        final_paragraphs[block.para_index]._p
+        for block in final_blocks
+        if block.kind in {"section", "job", "title"}
+    }
+    keep_spacer = False
+    for paragraph in iter_paragraphs(document):
+        if paragraph.text.strip():
+            keep_spacer = paragraph._p in headings
+        if keep_spacer:
+            paragraph.paragraph_format.keep_with_next = True
+
+    # Trailing spacer paragraphs can overflow onto an otherwise blank page
+    # after heading pagination changes. Retain any structural section break.
+    for paragraph in reversed(document.paragraphs):
+        if paragraph.text.strip() or paragraph._p.xpath(".//w:sectPr | .//w:drawing | .//w:pict"):
+            break
+        _delete_paragraph(paragraph)
 
     with atomic_output(dest, sources=[parent]) as staging:
         document.save(str(staging))

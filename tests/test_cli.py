@@ -13,18 +13,18 @@ def run_output(out, name):
 
 
 def test_missing_api_key_exits_2(monkeypatch, capsys, tmp_path):
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
     monkeypatch.chdir(tmp_path)
     code = main(["--jd", str(tmp_path / "nope.txt")])
     assert code == 2
     err = capsys.readouterr().err
-    assert "OPENAI_API_KEY" in err
-    assert "OPENAI_BASE_URL" in err
-    assert "OPENAI_MODEL" in err
+    assert "LLM_API_KEY" in err
+    assert "LLM_BASE_URL" in err
+    assert "LLM_MODEL" in err
 
 
 def test_cli_writes_new_file_and_leaves_source_untouched(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-not-real")
     resume = tmp_path / "resume.md"
     jd = tmp_path / "jd.txt"
     out = tmp_path / "out"
@@ -43,6 +43,7 @@ def test_cli_writes_new_file_and_leaves_source_untouched(monkeypatch, tmp_path, 
 
     def fake_complete(messages, **kwargs):
         assert messages[0]["role"] == "system"
+        assert "MATCH-FIRST RULES" in messages[0]["content"]
         assert "Never invent employers" in messages[0]["content"]
         assert "Python/AWS contractor" in messages[1]["content"]
         assert "Northwind Platform Co." in messages[1]["content"]
@@ -74,18 +75,17 @@ def test_cli_writes_new_file_and_leaves_source_untouched(monkeypatch, tmp_path, 
     assert "not-a-real-person@example.invalid" in written
     assert "AWS-hosted platform work" in written
     changelog = run_output(out, "CHANGELOG.md").read_text(encoding="utf-8")
-    assert "Retargeted summary" not in changelog
-    assert "Edited a passage" in changelog
+    assert "Retargeted summary" in changelog
     assert "**Match:**" in changelog
     assert "parent resume left unchanged" in changelog
     diff = run_output(out, "resume.diff").read_text(encoding="utf-8")
     assert "AWS-hosted platform work" in diff
-    assert "Edited a passage" in captured.out
+    assert "Retargeted summary" in captured.out
     assert "resume_tailored" in captured.out
 
 
 def test_cli_reads_jd_from_stdin(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-not-real")
     resume = tmp_path / "resume.md"
     resume.write_text(SAMPLE_RESUME, encoding="utf-8")
     out = tmp_path / "out"
@@ -100,7 +100,7 @@ def test_cli_reads_jd_from_stdin(monkeypatch, tmp_path, capsys):
 
     code = main(["--jd", "-", "--resume", str(resume), "--out", str(out)])
     assert code == 0
-    assert "Edited a passage" in run_output(out, "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "Light keyword pass" in run_output(out, "CHANGELOG.md").read_text(encoding="utf-8")
     assert "AWS-hosted platform work" in (
         run_output(out, "resume_tailored.md")
     ).read_text(encoding="utf-8")
@@ -108,7 +108,7 @@ def test_cli_reads_jd_from_stdin(monkeypatch, tmp_path, capsys):
 
 
 def test_guardrail_failure_does_not_overwrite_source(monkeypatch, tmp_path, capsys):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
+    monkeypatch.setenv("LLM_API_KEY", "sk-test-not-real")
     resume = tmp_path / "resume.md"
     jd = tmp_path / "jd.txt"
     out = tmp_path / "out"
@@ -135,61 +135,10 @@ def test_guardrail_failure_does_not_overwrite_source(monkeypatch, tmp_path, caps
     assert run_output(out, "resume.diff").is_file()
 
 
-def test_first_run_copies_immutable_backup(monkeypatch, tmp_path):
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-    resume_dir = tmp_path / "resume"
-    resume_dir.mkdir()
-    resume = resume_dir / "base.md"
-    original = resume_dir / "base.original.md"
-    jd = tmp_path / "jd.txt"
-    out = tmp_path / "out"
-    resume.write_text(SAMPLE_RESUME, encoding="utf-8")
-    jd.write_text("Python contractor\n", encoding="utf-8")
-    tailored = lightly_tailored(SAMPLE_RESUME)
-    raw = pack_model_output(
-        changelog=["Light keyword pass"],
-        match="partial: light alignment",
-        resume=tailored,
-    )
-    monkeypatch.setattr("resume_tailor.cli.complete", lambda *a, **k: raw)
-
-    assert not original.exists()
-    code = main(["--jd", str(jd), "--resume", str(resume), "--out", str(out)])
-    assert code == 0
-    assert original.is_file()
-    assert original.read_text(encoding="utf-8") == SAMPLE_RESUME
-    assert "AWS-hosted platform work" in (
-        run_output(out, "resume_tailored.md")
-    ).read_text(encoding="utf-8")
-
-    # Second run must not clobber the backup.
-    code = main(["--jd", str(jd), "--resume", str(resume), "--out", str(out)])
-    assert code == 0
-    assert original.read_text(encoding="utf-8") == SAMPLE_RESUME
 
 
-def test_reset_restores_from_original(monkeypatch, tmp_path, capsys):
-    resume_dir = tmp_path / "resume"
-    resume_dir.mkdir()
-    resume = resume_dir / "base.md"
-    original = resume_dir / "base.original.md"
-    original.write_text(SAMPLE_RESUME, encoding="utf-8")
-    resume.write_text("tampered\n", encoding="utf-8")
-
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    code = main(["--reset", "--resume", str(resume)])
-    assert code == 0
-    assert resume.read_text(encoding="utf-8") == SAMPLE_RESUME
-    assert "Restored" in capsys.readouterr().out
 
 
-def test_reset_without_backup_fails(monkeypatch, tmp_path, capsys):
-    resume = tmp_path / "base.md"
-    resume.write_text(SAMPLE_RESUME, encoding="utf-8")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    code = main(["--reset", "--resume", str(resume)])
-    assert code == 1
-    assert "No backup" in capsys.readouterr().err
 
 
 def test_tailor_result_roundtrip_used_by_cli():
@@ -203,46 +152,51 @@ def test_tailor_result_roundtrip_used_by_cli():
     assert result.changelog == ["x"]
 
 
-def test_missing_resume_is_rejected_even_when_a_docx_is_present(tmp_path, monkeypatch, capsys):
-    pytest.importorskip("docx")
+
+
+def test_default_resume_is_the_first_word_file_not_markdown(tmp_path, monkeypatch):
     from docx import Document
+
+    from resume_tailor.cli import _resolve_resume
+    from resume_tailor.pipeline import _load_source_text
 
     resume_dir = tmp_path / "resume"
     resume_dir.mkdir()
-    document = Document()
-    document.add_paragraph("Alex Placeholder (SAMPLE)")
-    document.save(resume_dir / "Someone_resume.docx")
-    jd = tmp_path / "jd.txt"
-    jd.write_text("Python contractor\n", encoding="utf-8")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
-    monkeypatch.chdir(tmp_path)
-
-    code = main(["--jd", str(jd)])
-    err = capsys.readouterr().err
-    assert code == 1
-    assert "No base resume" in err
-    assert not (tmp_path / "out").exists()
-
-
-def test_explicit_resume_path_is_required_and_used(tmp_path):
-    from resume_tailor.cli import _load_source_text, _resolve_resume
-    from docx import Document
-
-    resume_dir = tmp_path / "resume"
-    resume_dir.mkdir()
-    chosen = resume_dir / "chosen.docx"
-    other = resume_dir / "other.docx"
-    for path, identity in (
-        (chosen, "Chosen Candidate (SAMPLE)"),
-        (other, "Other Candidate (SAMPLE)"),
+    for name, identity in (
+        ("a_candidate.docx", "First Candidate (SAMPLE)"),
+        ("b_candidate.docx", "Second Candidate (SAMPLE)"),
     ):
         document = Document()
         document.add_paragraph(identity)
-        document.save(path)
+        document.save(resume_dir / name)
+    (resume_dir / "base.md").write_text("Outdated markdown", encoding="utf-8")
 
-    with pytest.raises(ValueError, match="No base resume"):
-        _resolve_resume(None)
-    source = _resolve_resume(str(chosen))
-    assert source == chosen
-    assert "Chosen Candidate (SAMPLE)" in _load_source_text(source)
-    assert "Other Candidate" not in _load_source_text(source)
+    monkeypatch.chdir(tmp_path)
+    source = _resolve_resume(None)
+    assert source == resume_dir / "a_candidate.docx"
+    assert "First Candidate (SAMPLE)" in _load_source_text(source)
+
+
+def test_source_named_like_latest_json_is_protected(tmp_path, monkeypatch, capsys):
+    source, jd = tmp_path / "latest.json", tmp_path / "jd.txt"
+    source.write_text(SAMPLE_RESUME)
+    jd.write_text("Python APIs")
+    monkeypatch.setenv("LLM_API_KEY", "fake")
+    monkeypatch.setattr("resume_tailor.cli.complete", lambda *a, **k: pytest.fail("must protect source before calling model"))
+    code = main(["--resume", str(source), "--jd", str(jd), "--out", str(tmp_path)])
+    assert code == 1 and "protected source" in capsys.readouterr().err
+    assert source.read_text() == SAMPLE_RESUME
+
+
+
+
+def test_explicit_project_markdown_is_not_replaced_by_default_word(tmp_path, monkeypatch):
+    from resume_tailor import pipeline
+    resume_dir = tmp_path / "resume"
+    resume_dir.mkdir()
+    source = resume_dir / "custom.md"
+    source.write_text(SAMPLE_RESUME)
+    monkeypatch.setattr(pipeline, "__file__", str(tmp_path / "resume_tailor/pipeline.py"))
+    assert pipeline._load_source_text(source) == SAMPLE_RESUME
+    paths, parent = pipeline._output_paths(source, tmp_path / "out")
+    assert parent is None and "word" not in paths

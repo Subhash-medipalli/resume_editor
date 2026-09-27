@@ -1,7 +1,7 @@
 [project]
 name = "resume-tailor"
 version = "0.1.0"
-description = "Surgical, human-reviewable resume tailoring from a job description."
+description = "Job-description-driven, human-reviewable resume tailoring."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["certifi>=2024.0", "python-docx>=1.1"]

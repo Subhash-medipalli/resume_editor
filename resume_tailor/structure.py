@@ -51,6 +51,9 @@ SECTION_WORDS = frozenset(
 )
 CONTACT_MARKER_RE = re.compile(
     r"[\w.+-]+@[\w-]+\.[\w.]+|\+?\d[\d ()./-]{7,}\d"
+    r"|https?://[^\s<>]+|www\.[^\s<>]+|(?:linkedin\.com/in|github\.com)/[^\s<>]+"
+    r"|\b(?:linkedin|github|portfolio|website)\s*:",
+    re.IGNORECASE,
 )
 ENVIRONMENT_RE = re.compile(r"^Environment\s*:", re.IGNORECASE)
 
@@ -79,7 +82,7 @@ def _is_bullet_style(style: str) -> bool:
     return "list" in (style or "").lower()
 
 
-def _is_section(text: str, style: str) -> bool:
+def _is_section(text: str, style: str, after_job: bool = False) -> bool:
     if _is_bullet_style(style):
         return False
     stripped = text.strip()
@@ -90,7 +93,8 @@ def _is_section(text: str, style: str) -> bool:
     letters = [c for c in stripped if c.isalpha()]
     if not letters:
         return False
-    heading_style = style.lower().startswith("heading")
+    # A Heading-styled line right under a job heading is that job's title.
+    heading_style = style.lower().startswith("heading") and not after_job
     if not (heading_style or (all(c.isupper() for c in letters) and SECTION_RE.match(stripped))):
         return False
     words = re.findall(r"[A-Za-z]+", stripped.lower())
@@ -119,7 +123,7 @@ def parse_paragraphs(entries: list[tuple[str, str]]) -> list[Block]:
         if index == 0:
             # The first line is the candidate's name, even in capitals.
             kind = NAME
-        elif _is_section(text, style):
+        elif _is_section(text, style, after_job=previous_kind == JOB):
             kind = SECTION
             seen_section = True
         elif _is_job_heading(text):
@@ -212,18 +216,11 @@ def from_markdown(markdown: str) -> list[Block]:
 
         # Strip stray markdown emphasis the model may add inside a line.
         text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+        # Word identifies job headings by their visible text before considering
+        # bullet styling. Apply that same rule to bold/bulleted model output.
+        if kind != SECTION and (kind != NAME or blocks) and _is_job_heading(text):
+            kind = JOB
         blocks.append(Block(kind=kind, text=text))
         previous_kind = kind
 
     return blocks
-
-
-def header_block_length(blocks: list[Block]) -> int:
-    """How many leading blocks form the contact header (name/contact/tagline)."""
-    count = 0
-    for block in blocks:
-        if block.kind in (NAME, CONTACT, TAGLINE):
-            count += 1
-        else:
-            break
-    return count

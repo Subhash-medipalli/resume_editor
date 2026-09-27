@@ -4,7 +4,7 @@ import os
 import pytest
 from docx import Document
 
-from resume_tailor.cli import _write_outputs, main
+from resume_tailor.pipeline import _write_outputs
 from resume_tailor.docx_io import extract_markdown, write_tailored_docx
 from resume_tailor.files import atomic_output
 from tests.helpers import SAMPLE_RESUME
@@ -32,19 +32,6 @@ def test_markdown_source_is_checked_before_any_output(tmp_path):
     source.write_text(SAMPLE_RESUME)
     with pytest.raises(ValueError, match="protected source"):
         _write_outputs(tailored="# Altered", resume_path=source, out_dir=tmp_path)
-    assert source.read_text() == SAMPLE_RESUME
-
-
-@pytest.mark.parametrize("name", ["CHANGELOG.md", "model.raw.txt", "resume.diff", "resume.rejected.md"])
-def test_cli_protects_source_from_diagnostic_outputs(tmp_path, monkeypatch, capsys, name):
-    source = tmp_path / name
-    source.write_text(SAMPLE_RESUME)
-    jd = tmp_path / "jd.txt"
-    jd.write_text("Python engineer")
-    monkeypatch.setenv("OPENAI_API_KEY", "fake")
-    monkeypatch.setattr("resume_tailor.cli.complete", lambda *a, **k: pytest.fail("must reject before the model call"))
-    assert main(["--resume", str(source), "--out", str(tmp_path), "--jd", str(jd)]) == 1
-    assert "protected source" in capsys.readouterr().err
     assert source.read_text() == SAMPLE_RESUME
 
 

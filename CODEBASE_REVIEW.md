@@ -1,5 +1,7 @@
 # Resume tailor review
 
+> Archived audit from September 10, 2026. This describes an earlier implementation, including a required review gate, reset/backups, and conservative skill checks that have since been removed. The current behavior, configuration, validation limits, and verification commands are documented in [README.md](README.md). Historical test counts and local file links below are not current release evidence.
+
 Historical note: the personal base described below is the `sravya` branch snapshot. `main` does not include that file; upload a `.docx` or pass `--resume`.
 
 Reviewed and repaired on 10 September 2026. The updated base is installed and verified. **All four P1 findings are addressed:** edited claims require review, each browser run has separate source/output files and a stable download URL, and output paths cannot alias the source. Automated checks still cannot prove every claim; factual review is part of the workflow. **All six P2 findings are now addressed**, with the supported-layout boundary and remaining operational limits documented below.

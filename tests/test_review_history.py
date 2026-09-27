@@ -1,0 +1,93 @@
+import pytest
+
+from resume_tailor.guardrails import apply_guardrails, extract_facts
+from tests.helpers import PIPE_RESUME
+
+
+@pytest.mark.parametrize("quantity", ["2-hour", "2‑hour", "2–hour", "5-person"])
+def test_hyphenated_metric_changes_restore_the_original_line(quantity):
+    base = PIPE_RESUME.replace("Built fictional Python services.", f"Supported a {quantity} Python rollout.")
+    altered = base.replace(quantity, "20" + quantity[1:])
+    fixed, report = apply_guardrails(base, altered)
+    assert report.ok and fixed == base
+    assert report.warnings
+
+
+@pytest.mark.parametrize("before,after", [("2-hour", "2 hours"), ("5-person", "5 people")])
+def test_metric_rephrasing_keeps_the_same_quantity(before, after):
+    base = PIPE_RESUME.replace("Built fictional Python services.", f"Supported a {before} Python rollout.")
+    altered = base.replace(before, after)
+    fixed, report = apply_guardrails(base, altered)
+    assert report.ok and fixed == altered and not report.warnings
+
+
+@pytest.mark.parametrize("link", [
+    "https://www.linkedin.com/in/sample-placeholder",
+    "github.com/sample-placeholder",
+    "Portfolio: www.example.invalid/sample-placeholder",
+])
+@pytest.mark.parametrize("change", ["replace", "delete"])
+def test_separate_contact_links_are_restored_without_losing_a_new_headline(link, change):
+    base = PIPE_RESUME.replace("pipe-format@example.invalid\n", f"pipe-format@example.invalid\n{link}\n")
+    replacement = link.replace("sample-placeholder", "another-person") if change == "replace" else ""
+    altered = base.replace(link, replacement + "\nPlatform Engineer | API Security")
+    fixed, report = apply_guardrails(base, altered)
+    assert report.ok and report.restored_contact
+    assert link in fixed and "another-person" not in fixed
+    assert "Platform Engineer | API Security" in fixed
+
+
+def test_unmarked_job_has_the_same_protected_facts_as_the_writer_sees():
+    unmarked = PIPE_RESUME.replace("### ", "")
+    assert extract_facts(unmarked).job_headings == extract_facts(PIPE_RESUME).job_headings
+    assert extract_facts(unmarked).titles == extract_facts(PIPE_RESUME).titles
+    altered = unmarked.replace("Senior Widget Engineer (SAMPLE)", "Director of Engineering")
+    _, report = apply_guardrails(unmarked, altered)
+    assert not report.ok
+    assert any("facts together" in problem for problem in report.violations)
+
+
+@pytest.mark.parametrize("label", ["client", "project", "Client:", "project named"])
+def test_client_and_project_names_cannot_be_changed(label):
+    base = PIPE_RESUME.replace("Built fictional Python services.", f"Built Python services for {label} Northstar using Terraform.")
+    altered = base.replace(f"{label} Northstar", f"{label} Contoso")
+    _, report = apply_guardrails(base, altered)
+    assert not report.ok
+    assert any("Named clients or projects" in problem for problem in report.violations)
+
+
+@pytest.mark.parametrize("capability", [
+    "client SDKs and REST APIs", "client Python SDKs", "client REST APIs", "client React applications",
+    "Project Management workflows", "client OAuth integrations", "project CI/CD pipelines",
+])
+def test_generic_client_and_project_capabilities_can_be_added(capability):
+    altered = PIPE_RESUME.replace("Built fictional Python services.",
+                                 f"Built {capability} using Python and Kubernetes.")
+    fixed, report = apply_guardrails(PIPE_RESUME, altered)
+    assert report.ok and fixed == altered and not report.warnings
+
+
+def test_named_client_is_protected_even_when_followed_by_a_capability():
+    base = PIPE_RESUME.replace("Built fictional Python services.", "Built services for client Northstar APIs.")
+    _, report = apply_guardrails(base, base.replace("Northstar APIs", "Contoso APIs"))
+    assert not report.ok
+
+
+def test_explicit_project_name_is_not_treated_as_a_generic_capability():
+    base = PIPE_RESUME.replace("Built fictional Python services.", "Built project named Management APIs.")
+    _, report = apply_guardrails(base, base.replace("Management APIs", "Management SDKs"))
+    assert not report.ok
+
+
+def test_rewriting_the_sentence_after_a_client_does_not_rename_the_client():
+    base = PIPE_RESUME.replace("Built fictional Python services.", "Worked for client Northstar. Built Python services.")
+    draft = base.replace("Northstar. Built", "Northstar. Delivered")
+    _, report = apply_guardrails(base, draft)
+    assert report.ok, report.violations
+
+
+@pytest.mark.parametrize("label", ["Client Northstar", "Project Phoenix Migration"])
+def test_standalone_names_are_protected(label):
+    base = PIPE_RESUME.replace("Built fictional Python services. No real employer.", label)
+    _, report = apply_guardrails(base, base.replace(label, label.replace("Northstar", "Contoso").replace("Phoenix", "Falcon")))
+    assert not report.ok

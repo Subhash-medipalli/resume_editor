@@ -39,16 +39,21 @@ def test_parse_rejects_missing_resume_marker():
 def test_system_prompt_encodes_hard_constraints():
     text = SYSTEM_PROMPT.lower()
     for phrase in (
-        "surgical",
+        "add missing jd skills",
         "never invent employers",
         "dates",
-        "titles",
+        "historical job titles",
         "education",
         "certifications",
-        "metrics",
-        "never add jobs",
-        "poor match",
-        "do not overhaul",
+        "do not add new numbers",
+        "write like the candidate",
         "changelog",
     ):
         assert phrase in text, f"system prompt missing {phrase!r}"
+
+
+def test_parser_removes_reasoning_and_resume_only_fence():
+    raw = pack_model_output(changelog=["Updated summary"], match="good: relevant",
+                            resume="```markdown\n# Test\nPython developer\n```")
+    result = parse_model_output("<think>Private drafting text</think>\n" + raw)
+    assert result.resume_markdown == "# Test\nPython developer\n"

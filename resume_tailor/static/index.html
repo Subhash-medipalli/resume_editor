@@ -21,6 +21,8 @@
     .help { color:var(--muted); font-size:14px; margin:0 0 14px; }
     textarea { display:block; width:100%; min-height:260px; padding:14px; border:1.5px solid var(--line); border-radius:10px; font:15px/1.5 inherit; color:var(--ink); resize:vertical; }
     textarea:focus { outline:none; border-color:var(--blue); box-shadow:0 0 0 3px rgba(21,93,252,.15); }
+    .options { margin-top:16px; }
+    .check { display:flex; gap:9px; align-items:flex-start; font-weight:400; margin:0 0 8px; }
     .row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; flex-wrap:wrap; }
     .kbd { color:var(--muted); font-size:13px; }
     .btn { appearance:none; border:0; border-radius:10px; padding:14px 22px; font:600 16px/1 inherit; cursor:pointer; text-decoration:none; display:inline-flex; align-items:center; gap:8px; }
@@ -38,6 +40,7 @@
     .history .label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
     .history .meta { color:var(--muted); flex:none; }
     .history button, .history a { color:var(--blue); font-weight:600; background:none; border:0; padding:0; cursor:pointer; font:inherit; text-decoration:none; flex:none; }
+    .history button:disabled { opacity:.55; cursor:wait; }
     .history .empty { color:var(--muted); font-style:italic; border:0; }
     /* working */
     .working { text-align:center; padding:48px 24px; }
@@ -89,15 +92,18 @@
   <!-- 1. enter -->
   <section id="enter" class="card">
     <label for="jd">Paste the job description</label>
-    <p class="help">The whole posting is best. You'll review every changed line before downloading. Match scores are model estimates and may be unavailable.</p>
+    <p class="help">Paste the whole posting to rewrite your summary, skills, and project descriptions for this role. Download the verified Word file and see every change below.</p>
     <textarea id="jd" placeholder="Paste the full job description here…"></textarea>
     <input type="file" id="file" accept=".docx" />
     <div class="fileline" id="fileline" hidden></div>
+    <div class="options">
+      <label class="check"><input type="checkbox" id="twoPass" /> Use a second polish pass (slower)</label>
+    </div>
     <div class="row">
       <span class="kbd">⌘ Enter to run · takes 2–5 minutes</span>
       <button class="btn primary big" id="go" type="button">Tailor resume</button>
     </div>
-    <div class="err" id="err" hidden></div>
+    <div class="err" id="err" role="alert" hidden></div>
   </section>
 
   <!-- 2. working -->
@@ -106,7 +112,7 @@
     <h2>Tailoring…</h2>
     <div class="t" id="timer">0:00</div>
     <p class="help" id="progress" role="status">Preparing the resume…</p>
-    <p class="help">The model usually takes 2–5 minutes. Retries share a total waiting limit. You'll review changed claims before downloading.</p>
+    <p class="help">The model usually takes 2–5 minutes. The finished Word file is checked to make sure the edits were saved.</p>
   </section>
 
   <!-- 3. result -->
@@ -126,7 +132,7 @@
       </div>
     </div>
     <div class="card banner red" id="blocked" hidden>
-      <h3>No approved download — the result failed checks</h3>
+      <h3>No download — the result failed checks</h3>
       <p>Diagnostic files were saved for review. This run has no downloadable resume. Read the failures below before trying again.</p>
       <ul id="violations"></ul>
     </div>
@@ -136,28 +142,22 @@
     </div>
     <h2 class="sec">What changed</h2>
     <div id="diff"></div>
-    <div class="card" id="review" hidden>
-      <h3>Check the edited claims</h3>
-      <p class="help">The original wording is shown above. Automated checks cannot prove that a reworded claim is true. Confirm that every change accurately describes the candidate's experience, including any added text.</p>
-      <label style="font-weight:400"><input type="checkbox" id="reviewed" /> I checked every change against the original and the candidate's experience.</label>
-      <button class="btn primary" type="button" id="approve" disabled>Confirm review</button>
-      <p class="err" id="reviewError" role="alert" hidden></p>
-    </div>
-    <h2 class="sec" id="changesHeading">Changes in this file</h2>
+    <h2 class="sec" id="changesHeading">Model's summary of changes</h2>
     <div class="card"><ul id="changes"></ul></div>
   </section>
 </div>
 <script>
   const $ = (id) => document.getElementById(id);
   const show = (id) => { for (const s of ["enter","working","result"]) $(s).hidden = s !== id; window.scrollTo({top:0, behavior:"smooth"}); };
-  let attached = null, tick = null, running = false, readingFile = false, pendingReview = null, selectedId = null;
+  let attached = null, tick = null, running = false, readingFile = false, selectedId = null, libraryItems = [];
 
   function loadHistory() {
     Promise.all([
       fetch("/api/library").then((r) => r.json()),
       fetch("/api/runs").then((r) => r.json()),
     ]).then(([library, runs]) => {
-      renderResumes(library.resumes || []);
+      libraryItems = library.resumes || [];
+      renderResumes(libraryItems);
       renderRuns(runs.runs || []);
     }).catch(() => {});
   }
@@ -168,7 +168,7 @@
     if (!items.length) {
       const li = document.createElement("li");
       li.className = "empty";
-      li.textContent = "None yet. Upload a .docx. Nothing is built in.";
+      li.textContent = "None yet. Upload a .docx to get started.";
       ul.appendChild(li);
       return;
     }
@@ -181,6 +181,7 @@
       const btn = document.createElement("button");
       btn.type = "button";
       btn.textContent = selectedId === item.id && !attached ? "selected" : "use";
+      btn.disabled = running || readingFile;
       btn.onclick = () => selectSaved(item);
       li.appendChild(label);
       li.appendChild(btn);
@@ -213,7 +214,7 @@
       } else {
         const note = document.createElement("span");
         note.className = "meta";
-        note.textContent = run.state === "working" ? "working" : run.ok === false ? "failed" : run.ok ? "review required" : "";
+        note.textContent = run.state === "working" ? "working" : run.ok === false ? "failed" : "unavailable";
         li.appendChild(note);
       }
       ul.appendChild(li);
@@ -221,6 +222,7 @@
   }
 
   function selectSaved(item) {
+    if (running || readingFile) return;
     selectedId = item.id;
     attached = null;
     $("file").value = "";
@@ -229,28 +231,38 @@
     $("fileline").textContent = "Using saved resume " + name + ".";
     $("fileline").hidden = false;
     $("err").hidden = true;
-    loadHistory();
+    show("enter");
+    renderResumes(libraryItems);
+  }
+
+  function updateControls() {
+    const busy = running || readingFile;
+    $("go").disabled = busy;
+    $("pick").disabled = busy;
+    $("twoPass").disabled = busy;
+    for (const button of $("resumes").querySelectorAll("button")) button.disabled = busy;
   }
 
   loadHistory();
 
   $("pick").onclick = () => $("file").click();
   $("file").addEventListener("change", async (e) => {
-    const f = e.target.files && e.target.files[0]; attached = null; $("fileline").hidden = true;
+    const f = e.target.files && e.target.files[0];
     if (!f) return;
+    show("enter");
     if (!f.name.toLowerCase().endsWith(".docx")) { $("err").textContent = "Please choose a .docx file."; $("err").hidden = false; e.target.value = ""; return; }
     if (f.size > 5000000) { $("err").textContent = "Please choose a Word file smaller than 5 MB."; $("err").hidden = false; e.target.value = ""; return; }
-    readingFile = true; $("go").disabled = true; $("pick").disabled = true;
+    readingFile = true; updateControls();
     try {
       const b = new Uint8Array(await f.arrayBuffer()); let s = "";
       for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
       selectedId = null;
       attached = { name: f.name, b64: btoa(s) };
-      $("baseName").textContent = f.name; $("fileline").textContent = "Using " + f.name + ". It is saved so you can reuse it. This run keeps its own copy."; $("fileline").hidden = false;
-      loadHistory();
+      $("baseName").textContent = f.name; $("fileline").textContent = "Using " + f.name + ". It will be saved for reuse when tailoring starts. Simple single-column Word layouts are supported."; $("fileline").hidden = false;
+      renderResumes(libraryItems);
       $("err").hidden = true;
     } catch (e) { $("err").textContent = "Could not read the Word file. Please choose it again."; $("err").hidden = false; }
-    finally { readingFile = false; $("go").disabled = false; $("pick").disabled = false; }
+    finally { readingFile = false; updateControls(); }
   });
 
   try { $("jd").value = localStorage.getItem("jd") || ""; } catch {}
@@ -262,27 +274,6 @@
 
   function list(id, items) { const ul = $(id); ul.textContent = ""; for (const t of items || []) { const li = document.createElement("li"); li.textContent = t; ul.appendChild(li); } return (items || []).length; }
 
-  $("reviewed").onchange = () => { $("approve").disabled = !$("reviewed").checked; };
-  $("approve").onclick = async () => {
-    const review = pendingReview;
-    if (!review || !$("reviewed").checked) return;
-    $("approve").disabled = true; $("reviewError").hidden = true;
-    try {
-      const res = await fetch(review.url, { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({reviewed:true, sha256:review.sha256}) });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || "Could not confirm this review.");
-      if (pendingReview !== review) return;
-      $("dl").href = data.download; $("dl").hidden = false;
-      $("review").hidden = true; pendingReview = null;
-      loadHistory();
-      $("dl").focus();
-    } catch (e) {
-      if (pendingReview !== review) return;
-      $("reviewError").textContent = e.message; $("reviewError").hidden = false;
-      $("approve").disabled = !$("reviewed").checked;
-    }
-  };
-
   function paintEvidence(items) {
     const el = $("diff"); el.textContent = "";
     for (const item of items) {
@@ -290,7 +281,7 @@
       const heading = document.createElement("p"); heading.style.padding = "0 16px";
       heading.textContent = item.section + (item.source_lines.length ? " · source lines " + item.source_lines.join(", ") : " · added passage");
       block.appendChild(heading);
-      for (const [cls, text] of [["was", item.before || "No corresponding source passage — verify the added claim."], ["now", item.after || "Passage removed."]]) {
+      for (const [cls, text] of [["was", item.before || "No previous passage."], ["now", item.after || "Passage removed."]]) {
         const d = document.createElement("div"); d.className = cls; d.textContent = text; block.appendChild(d);
       }
       el.appendChild(block);
@@ -316,15 +307,13 @@
     if (!jd) { $("err").textContent = "Paste a job description first."; $("err").hidden = false; return; }
     if (jd.length > 60000) { $("err").textContent = "Job description is too long (maximum 60,000 characters)."; $("err").hidden = false; return; }
     if (!attached && !selectedId) { $("err").textContent = "Upload a .docx base resume, or choose a saved one."; $("err").hidden = false; return; }
-    running = true; $("pick").disabled = true;
-    pendingReview = null; $("reviewed").checked = false; $("approve").disabled = true;
-    $("review").hidden = true; $("reviewError").hidden = true;
+    running = true; updateControls();
     $("dl").hidden = true; $("dl").removeAttribute("href");
     $("err").hidden = true; $("timer").textContent = "0:00"; show("working");
     $("progress").textContent = "Preparing the source resume…";
     const t0 = Date.now(); clearInterval(tick);
     tick = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("timer").textContent = `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`; }, 500);
-    const payload = { jd };
+    const payload = { jd, two_pass: $("twoPass").checked };
     if (attached) { payload.resume_b64 = attached.b64; payload.resume_name = attached.name; }
     else payload.resume_id = selectedId;
     let data;
@@ -333,6 +322,13 @@
       data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || res.statusText);
       if (res.status === 202) {
+        if (typeof data.resume_id === "string" && /^[0-9a-f]{32}$/.test(data.resume_id)) {
+          selectedId = data.resume_id;
+          attached = null;
+          $("file").value = "";
+          $("fileline").textContent = "Using saved resume " + $("baseName").textContent + ".";
+        }
+        loadHistory();
         const statusUrl = data.status;
         while (true) {
           const statusResponse = await fetch(statusUrl);
@@ -347,22 +343,20 @@
     } catch (e) {
       clearInterval(tick); show("enter"); $("err").textContent = e.message; $("err").hidden = false; return;
     } finally {
-      running = false; $("pick").disabled = false; loadHistory();
+      running = false; updateControls(); loadHistory();
     }
     clearInterval(tick);
     const sc = data.match_score; const cls = !data.ok ? "blocked" : sc == null ? "" : sc >= 75 ? "good" : sc >= 50 ? "mid" : "poor";
     $("ring").className = "ring " + cls; $("ring").textContent = sc ?? "–";
     $("ring").hidden = sc == null;
-    $("fit").textContent = data.ok ? (sc == null ? "Match estimate unavailable" : "Model estimate: " + (sc >= 75 ? "good fit" : sc >= 50 ? "partial fit" : "poor fit")) + ` · ${data.changed_lines || 0} line${data.changed_lines === 1 ? "" : "s"} changed` : "No downloadable result";
+    const cov = data.coverage ? data.coverage.score : null;
+    $("fit").textContent = data.ok ? (sc == null ? "Match estimate unavailable" : "Model estimate: " + (sc >= 75 ? "good fit" : sc >= 50 ? "partial fit" : "poor fit")) + ` · ${data.changed_lines || 0} line${data.changed_lines === 1 ? "" : "s"} changed` + (cov == null ? "" : ` · ${cov}% of JD keywords`) : "No downloadable result";
     $("why").textContent = [data.match_line, data.score_note].filter((v,i,a) => v && a.indexOf(v) === i).join(" ");
     $("dl").hidden = !data.download; if (data.download) $("dl").href = data.download;
-    if (data.ok && data.review_required && data.review) {
-      pendingReview = {url:data.review, sha256:data.sha256}; $("review").hidden = false;
-    }
     $("retry").hidden = !!data.ok;
     $("blocked").hidden = !list("violations", data.violations);
     $("warn").hidden = !list("warnings", data.warnings);
-    $("changesHeading").textContent = data.ok ? "Changes in this file" : "Proposed changes (not published)";
+    $("changesHeading").textContent = data.ok ? "Model's summary of changes" : "Proposed changes (not published)";
     if (!list("changes", data.changes)) $("changes").innerHTML = '<li class="empty">Nothing listed.</li>';
     if (data.review_items && data.review_items.length) paintEvidence(data.review_items); else paintDiff(data.diff);
     show("result");
