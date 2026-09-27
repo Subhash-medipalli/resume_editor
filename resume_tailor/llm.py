@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from resume_tailor.prompt import SYSTEM_PROMPT, build_user_prompt
-from resume_tailor.guardrails import _changed_content_lines
+from resume_tailor.guardrails import _changed_content_lines, content_preservation_issues
 from resume_tailor.structure import from_markdown
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
@@ -287,6 +287,9 @@ def tailor_resume(
         )
         try:
             result = parse_model_output(raw)
+            omissions = content_preservation_issues(resume_markdown, result.resume_markdown)
+            if omissions:
+                raise LLMError("Content was removed: " + "; ".join(omissions))
             if not polish and not has_resume_changes(resume_markdown, result.resume_markdown):
                 raise LLMError("The model returned the original resume without any content changes.")
             return result
@@ -294,14 +297,15 @@ def tailor_resume(
             if attempt:
                 raise LLMError(f"The model did not produce a usable tailored resume after one corrective retry: {exc}") from exc
             if progress:
-                progress("Requesting a corrected response because the model returned unchanged or invalid output")
+                progress("Requesting a corrected response because the model returned unchanged, incomplete, or invalid output")
             # Reuse the original request. Do not echo a malformed response or
             # possible reasoning text back into the conversation.
             messages = [*messages, {"role": "user", "content": (
                 f"The previous response failed validation: {exc} "
                 "Return the complete resume in the required CHANGELOG, MATCH, and RESUME sections. "
                 "Make substantive job-description-specific changes to the editable summary, skills, "
-                "and relevant experience. Preserve the protected identity and history fields."
+                "and relevant experience. Keep at least the original number of bullets in each role and summary, "
+                "and retain all existing skills while adding relevant skills. Preserve the protected identity and history fields."
             )}]
 
 

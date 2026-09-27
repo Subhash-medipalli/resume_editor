@@ -47,16 +47,18 @@ def tailor(tmp_path, monkeypatch):
         original_bytes = source.read_bytes()
         first = edit(extract_markdown(source))
         drafts = [first] if polish is None else [first, polish(first)]
-        replies = iter(
+        replies = [
             pack_model_output(changelog=["Tailored to the job description"],
                               match="SCORE: 95\ngood: relevant skills", resume=draft)
             for draft in drafts
-        )
+        ]
+        reply_iter = iter(replies)
         out_dir = tmp_path / "out" / "runs" / uuid4().hex
         result = run_tailoring(
             job_description=jd, resume_path=source, out_dir=out_dir,
             api_key="fake-no-network", base_url="https://example.invalid", model="test",
-            complete_fn=lambda *args, **kwargs: next(replies), two_pass=polish is not None,
+            # A persistently invalid provider can return the same draft on retry.
+            complete_fn=lambda *args, **kwargs: next(reply_iter, replies[-1]), two_pass=polish is not None,
         )
         assert source.read_bytes() == original_bytes
         return result, out_dir
@@ -206,13 +208,13 @@ def test_changed_unpunctuated_client_name_has_no_download(tailor):
 
 def test_download_keeps_first_pass_when_polish_swaps_keywords(tailor):
     result, _ = tailor(
-        lambda base: base.replace("Tools: Python", "Tools: Python, Kafka"),
+        lambda base: base.replace("Python platform engineer.", "Python platform engineer using Kafka."),
         polish=lambda first: first.replace("Kafka", "RabbitMQ"),
         jd="Required: Python, Kafka, RabbitMQ",
     )
     text = _download_text(result)
     assert "Kafka" in text and "RabbitMQ" not in text
-    assert result["polish_error"]
+    assert result["polish_error"] == "The polish removed job keywords."
     assert "Kafka" in result["coverage"]["matched"]
 
 

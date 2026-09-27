@@ -25,15 +25,15 @@ Open [the local app](http://127.0.0.1:8787), select or attach a resume, paste th
 
 ## What the checks do
 
-- **Skills and wording change freely.** Missing job keywords are sent to the model as editing targets. There is no edit budget.
+- **Skills expand and points keep their depth.** Missing job keywords are sent to the model as editing targets. Every role and summary keeps at least its original bullet count, and existing skills remain in the skills sections while relevant skills are added. Reordering and regrouping skills are allowed; existing skill names must remain recognizable. There is no rewrite budget.
 - **Work history is protected.** Changed employers, job titles, dates, named clients/projects, or qualification-section contents fail validation with no download. A new degree claim in editable prose restores that line while retaining other valid edits; employer names containing words such as Education do not change this behavior.
 - **Numbers stay with their role.** If an edit adds, changes, or drops a detected quantity (including "5-person" teams and "2-hour" windows), that line keeps its original wording and the run continues. "11+ years" and "over 11 years" count as the same claim.
 - **The prompt asks for a believable timeline.** It places the job's main platform (for example AWS) in the most recent role, a comparable alternative (for example Azure) in the role before it, and keeps older roles on their own tools. Platform distribution is model guidance, not a deterministic check.
 - **Known tool release years are checked per role.** A line that adds a tool released after its role ended (for example AWS Glue in a job that ended in 2015) keeps its original wording; an added bullet is dropped. Copied bullets and hyphenated wording such as "LangGraph-based" are checked too. A tool already named in that same original role is exempt.
 - **Certifications cannot be assembled from unrelated credentials.** A detected new certification claim keeps its original line. Each claimed credential must match one original credential; mentioning a real certification elsewhere, such as in the summary, is fine.
 - **Contact details**, including separate LinkedIn, GitHub, and website links, are restored from the original when altered.
-- **Polish preserves every matched JD keyword.** A second pass that removes a first-pass match is discarded even if it adds other keywords.
-- An unchanged model reply gets one corrective retry. A result that is still unchanged fails with no download.
+- **Polish preserves skills, points, and every matched JD keyword.** A second pass that removes a first-pass skill, drops below its bullet counts, or removes a matched JD keyword is discarded if it cannot be corrected.
+- An unchanged or incomplete model reply gets one corrective retry within the existing time limit. If it still removes points or skills, or stays unchanged, the run fails with no download. Content retention is checked again after protected-claim repairs.
 
 Claim detection uses text patterns. Outside frozen qualification sections, degree checks recognize common degree levels; they do not compare every possible degree subject or institution in prose. Client/project checks recognize explicit labels, standalone names, and relationship phrases such as "for client Northstar". These checks are not exhaustive entity recognition.
 
@@ -45,7 +45,7 @@ Two different numbers are reported. **Keyword coverage** is the share of skill-l
 
 Use a single column of body paragraphs with recognizable section headings. Write each job heading as `Company | dates`, followed by a job-title paragraph. Month names, numeric month/year, year-only ranges, and Present/Current/Now are supported.
 
-Tables, columns, text boxes, content in headers or footers, tracked changes, fields, and manual line breaks inside paragraphs are rejected before model work. Word list styles and paragraph numbering are supported. Existing bold/italic run formatting is retained where text survives. Section and job headings stay with their following content to reduce orphaned headings.
+Tables, columns, text boxes, content in headers or footers, tracked changes, fields, and manual line breaks inside paragraphs are rejected before model work. Word list styles and paragraph numbering are supported. Existing bold/italic run formatting is retained where text survives. Section and job headings stay with their following content to reduce orphaned headings. Empty manual page-break paragraphs are removed so later experience flows upward instead of leaving large gaps; ordinary spacing and structural section breaks remain.
 
 A rewritten document may paginate differently from the input. Text verification checks saved content and order; it is not a visual layout proof for every possible template.
 
