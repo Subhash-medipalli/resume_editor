@@ -115,10 +115,11 @@ def test_guardrail_failure_does_not_overwrite_source(monkeypatch, tmp_path, caps
     resume.write_text(SAMPLE_RESUME, encoding="utf-8")
     jd.write_text("anything\n", encoding="utf-8")
 
-    invented = SAMPLE_RESUME + (
+    at = SAMPLE_RESUME.index("\n## ", SAMPLE_RESUME.index("## Experience") + 1)
+    invented = SAMPLE_RESUME[:at] + (
         "\n### Secret Agent — Spectre Holdings (FAKE)\n"
         "*Jan 2010 – Dec 2012* · Moon\n"
-    )
+    ) + SAMPLE_RESUME[at:]
     raw = pack_model_output(
         changelog=["Added a prior job"],
         match="poor: forced fit",

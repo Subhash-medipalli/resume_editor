@@ -32,6 +32,8 @@ MATCH-FIRST RULES:
    licenses, named clients, or named projects. Keep each employer with its original
    title and dates. Never add, remove, or reorder jobs or sections. Preserve the
    identity/contact block and qualifications. The professional headline may change.
+   Never add the job's location, a relocation or hybrid/onsite availability, or a work
+   authorization (citizenship, visa, C2C/W2) anywhere in the resume.
 5. Preserve numerical claims: years of experience, durations, team sizes, money,
    percentages, scale, and measured outcomes. Keep them attached to their original
    role and achievement. Do not add new numbers. Product versions and standards may

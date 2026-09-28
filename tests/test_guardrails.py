@@ -116,10 +116,11 @@ def test_pipe_headings_extract_company_not_the_word_present():
 
 
 def test_pipe_heading_invented_employer_is_rejected():
-    hacked = PIPE_RESUME + (
-        "\n### Spectre Holdings, Moon | Jan 2010 – Dec 2012\n"
-        "**Secret Agent (FAKE)**\n"
-    )
+    at = PIPE_RESUME.index("## Education")
+    hacked = PIPE_RESUME[:at] + (
+        "### Spectre Holdings, Moon | Jan 2010 – Dec 2012\n"
+        "**Secret Agent (FAKE)**\n\n"
+    ) + PIPE_RESUME[at:]
     _, report = apply_guardrails(PIPE_RESUME, hacked)
     assert not report.ok
     joined = " ".join(report.violations).lower()
@@ -170,9 +171,9 @@ def test_expanded_employer_name_is_rejected():
         "Northstar Fictional Bank, Testland",
         "Northstar Fictional Bank Holdings Group Pte Ltd, Testland",
     )
-    _, report = apply_guardrails(PIPE_RESUME, hacked)
-    assert not report.ok
-    assert any("employer" in v.lower() for v in report.violations)
+    fixed, report = apply_guardrails(PIPE_RESUME, hacked)
+    assert report.ok and fixed == PIPE_RESUME
+    assert any("Kept your original job heading" in w for w in report.warnings)
 
 
 def test_inflated_job_title_is_rejected():
@@ -180,9 +181,9 @@ def test_inflated_job_title_is_rejected():
     hacked = PIPE_RESUME.replace(
         "Data Tinkerer (SAMPLE)", "Principal Staff Data Tinkerer (SAMPLE)"
     )
-    _, report = apply_guardrails(PIPE_RESUME, hacked)
-    assert not report.ok
-    assert any("title" in v.lower() for v in report.violations)
+    fixed, report = apply_guardrails(PIPE_RESUME, hacked)
+    assert report.ok and fixed == PIPE_RESUME
+    assert any("Kept your original job title" in w for w in report.warnings)
 
 
 def test_inflated_years_of_experience_are_put_back():
@@ -267,21 +268,17 @@ def test_match_first_does_not_require_an_exact_source_or_jd_vocabulary_match():
     assert not report.warnings
 
 
-def test_match_first_still_rejects_employer_date_and_education_changes():
+def test_match_first_restores_employer_date_and_education_changes():
     tailored = (
         SAMPLE_RESUME.replace("Northwind Platform Co. (SAMPLE)", "Invented Corp (FAKE)")
         .replace("Jul 2023 – Present", "Jan 2020 – Present")
         .replace("Placeholder State University (SAMPLE)", "Imaginary University (FAKE)")
     )
-    _, report = apply_guardrails(
-        SAMPLE_RESUME,
-        tailored,
-    )
-    assert not report.ok
-    failures = " ".join(report.violations).lower()
-    assert "employer" in failures
-    assert "date" in failures
-    assert "education" in failures or "qualification" in failures
+    fixed, report = apply_guardrails(SAMPLE_RESUME, tailored)
+    assert report.ok, report.violations
+    assert "Northwind Platform Co. (SAMPLE)" in fixed and "Invented Corp" not in fixed
+    assert "Jul 2023 – Present" in fixed and "Placeholder State University (SAMPLE)" in fixed
+    assert "Imaginary University" not in fixed
 
 
 
@@ -301,18 +298,15 @@ def test_match_first_keeps_concrete_responsibilities_for_new_capabilities():
     assert not report.warnings
 
 
-def test_match_first_rejects_a_new_named_project_even_when_the_jd_mentions_it():
+def test_match_first_undoes_a_new_named_project_even_when_the_jd_mentions_it():
     tailored = SAMPLE_RESUME.replace(
         "- Added Redis caching for read-heavy lookup endpoints and documented failure modes.",
         "- Experience with SSO delivery for project named Phoenix Migration.",
     )
-    fixed, report = apply_guardrails(
-        SAMPLE_RESUME,
-        tailored,
-    )
-    assert not report.ok
-    assert "Phoenix Migration" in fixed
-    assert any("Named clients or projects" in v for v in report.violations)
+    fixed, report = apply_guardrails(SAMPLE_RESUME, tailored)
+    assert report.ok, report.violations
+    assert "Phoenix Migration" not in fixed
+    assert "- Added Redis caching for read-heavy lookup endpoints and documented failure modes." in fixed
 
 
 def test_default_allows_full_resume_rewriting_without_a_line_ceiling():

@@ -138,6 +138,8 @@ def run_tailoring(
                     polish_error = "The polish removed job keywords."
                 else:
                     chosen = polished
+                    # The final file still carries what the checks did to the first pass.
+                    polished.report.warnings = list(dict.fromkeys([*first.report.warnings, *polished.report.warnings]))
                 if polish_error:
                     write_text(out_dir / "model.positioning.raw.txt", polished.raw, sources=sources)
             except LLMError as exc:
@@ -265,8 +267,10 @@ def _run_one_pass(
         progress=progress,
         missing_keywords=keyword_coverage(keywords, resume_markdown)["missing"],
         polish=validation_base is not None,
+        validate=lambda draft: apply_guardrails(base, draft)[1].violations,
     )
     tailored, report = apply_guardrails(base, result.resume_markdown)
+    report.warnings[:0] = result.restored
     if not has_resume_changes(base, tailored):
         report.violations.append("No content changes survived validation; no tailored resume was produced.")
         report.ok = False
@@ -276,7 +280,7 @@ def _run_one_pass(
         match_score=result.match_score,
         match_line=result.match_line,
         changelog=result.changelog,
-        changed_by_checks=bool(review_edits(result.resume_markdown, tailored)),
+        changed_by_checks=result.kept_facts or bool(review_edits(result.resume_markdown, tailored)),
         report=report,
     )
 

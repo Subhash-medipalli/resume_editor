@@ -2,7 +2,7 @@
 
 import pytest
 
-from resume_tailor.guardrails import apply_guardrails, content_preservation_issues
+from resume_tailor.guardrails import apply_guardrails, content_preservation_issues, restore_content
 
 
 BASE = """# Synthetic Candidate
@@ -47,9 +47,10 @@ def test_one_roles_extra_point_cannot_compensate_for_another_roles_missing_point
     problems = content_preservation_issues(BASE, draft)
     assert len(problems) == 1
     assert "Role 1" in problems[0] and "expected at least 2, found 1" in problems[0]
-    _, report = apply_guardrails(BASE, draft)
-    assert not report.ok
-    assert any("Bullet count dropped" in problem for problem in report.violations)
+    fixed, report = apply_guardrails(BASE, draft)
+    assert report.ok, report.violations
+    assert "- Built Python services.\n- Maintained batch ingestion.\n" in fixed
+    assert any("Restored an original point" in warning and "Role 1" in warning for warning in report.warnings)
 
 
 def test_summary_points_cannot_be_removed_or_combined():
@@ -92,7 +93,7 @@ def test_skill_moved_only_into_experience_still_counts_as_missing():
     assert len(problems) == 1 and "sections: dbt." in problems[0]
 
 
-def test_final_guardrail_gate_checks_counts_after_timeline_line_repairs():
+def test_point_dropped_by_a_timeline_repair_is_restored():
     # The invalid insertion and separate deletion are distinct diff operations:
     # dropping the added tool must not silently publish fewer experience points.
     draft = (BASE.replace("- Operated Python services.", "- Built LangGraph agents.\n- Operated Python services.")
@@ -100,8 +101,40 @@ def test_final_guardrail_gate_checks_counts_after_timeline_line_repairs():
     assert content_preservation_issues(BASE, draft) == []
     fixed, report = apply_guardrails(BASE, draft)
     assert "LangGraph" not in fixed
-    assert not report.ok
-    assert any("Bullet count dropped" in problem for problem in report.violations)
+    assert report.ok, report.violations
+    assert "- Operated Python services.\n- Maintained SQL reports.\n" in fixed
+
+
+def test_dropped_skill_goes_back_beside_its_original_neighbours():
+    base = ("# Candidate\n\n## Technical Skills\nLanguages: Python, SQL\n"
+            "AWS: S3, Glue, CodePipeline, CodeCommit, CodeBuild\nData: Snowflake, dbt\n")
+    draft = base.replace("AWS: S3, Glue, CodePipeline, CodeCommit, CodeBuild",
+                         "Cloud Services: S3, Glue, CodePipeline, CodeBuild, Lambda, EMR")
+    fixed, notes = restore_content(base, draft)
+    assert "Cloud Services: S3, Glue, CodePipeline, CodeBuild, Lambda, EMR, AWS, CodeCommit\n" in fixed
+    assert notes == ["Restored skills the model removed from your skills section: AWS, CodeCommit."]
+    assert content_preservation_issues(base, fixed) == []
+    assert restore_content(base, fixed) == (fixed, [])
+
+
+def test_merged_point_is_noted_not_repeated():
+    base = BASE.replace("- Operated Python services.", "- Operated Python services for 40 teams.")
+    draft = base.replace("- Operated Python services for 40 teams.\n- Maintained SQL reports.",
+                         "- Operated Python services for 40 teams and maintained SQL reports.")
+    fixed, notes = restore_content(base, draft)
+    assert fixed == draft
+    assert len(notes) == 1 and "merged" in notes[0] and "Role 2" in notes[0]
+    assert content_preservation_issues(base, draft) and not content_preservation_issues(base, draft, allow_merges=True)
+    _, report = apply_guardrails(base, draft)
+    assert report.ok, report.violations
+
+
+def test_without_skills_lines_nothing_is_guessed():
+    draft = BASE.replace("- Languages: Python, R, C++, C#, SQL\n- Data tools: dbt, SQL Server, CI/CD\n"
+                         "- Platforms: AWS (EC2, S3), Azure\n", "")
+    fixed, notes = restore_content(BASE, draft)
+    assert (fixed, notes) == (draft, [])
+    assert any("Existing skills were removed" in issue for issue in content_preservation_issues(BASE, draft))
 
 
 @pytest.mark.parametrize("label,missing", [("AWS", "AWS"), ("Azure Services", "Azure"),

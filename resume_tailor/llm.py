@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import math
 import os
@@ -13,11 +14,11 @@ from concurrent.futures import Future, TimeoutError as FutureTimeout
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from resume_tailor.prompt import SYSTEM_PROMPT, build_user_prompt
-from resume_tailor.guardrails import _changed_content_lines, content_preservation_issues
+from resume_tailor.guardrails import _changed_content_lines, content_preservation_issues, restore_content, restore_frozen
 from resume_tailor.structure import from_markdown
 
 DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
@@ -35,6 +36,10 @@ class LLMError(RuntimeError):
     """Provider HTTP or payload error."""
 
 
+class _EmptyReply(LLMError):
+    """HTTP 200 without a usable answer. Providers document these as transient."""
+
+
 @dataclass(frozen=True)
 class TailorResult:
     resume_markdown: str
@@ -42,6 +47,8 @@ class TailorResult:
     match_line: str
     match_score: int | None
     raw: str
+    restored: tuple[str, ...] = ()  # warnings for content the checks put back
+    kept_facts: bool = False  # the draft reworded a protected fact, so its self-score is suspect
 
 
 def load_dotenv(path: Path) -> None:
@@ -158,11 +165,17 @@ def complete(
     for attempt in range(MAX_ATTEMPTS):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise LLMError("The model exceeded the total time limit. Run again when the provider is available.")
+            raise LLMError("The model exceeded the total time limit. Run again when the provider is available."
+                           + (f" Last problem: {last_error}" if last_error else ""))
         progress(f"Waiting for model reply — attempt {attempt + 1} of {MAX_ATTEMPTS}")
         try:
-            body = _request_with_deadline(request, min(timeout, remaining), remaining)
-            break
+            return _answer(_request_with_deadline(request, min(timeout, remaining), remaining), nvidia)
+        except _EmptyReply as exc:
+            last_error = exc
+        except LLMError as exc:
+            if last_error is None:
+                raise
+            raise LLMError(f"{exc} Earlier problem: {last_error}") from exc
         except urllib.error.HTTPError as exc:
             detail = getattr(exc, "provider_detail", exc.reason)
             last_error = LLMError(f"LLM request failed (HTTP {exc.code}): {detail}")
@@ -176,38 +189,58 @@ def complete(
             last_error = LLMError(f"LLM returned a non-JSON response: {exc}")
 
         if attempt == MAX_ATTEMPTS - 1:
+            if isinstance(last_error, _EmptyReply):
+                raise LLMError(f"{model} did not return a usable answer in {MAX_ATTEMPTS} attempts; the last was "
+                               f"{last_error}. The provider is having trouble; run again in a few minutes.")
             raise last_error
         delay = RETRY_BACKOFF_SECONDS[min(attempt, len(RETRY_BACKOFF_SECONDS) - 1)]
         remaining = deadline - time.monotonic()
         if delay >= remaining:
-            raise LLMError("The model exceeded the total time limit. No more retries were started.") from last_error
-        progress(f"Provider unavailable — retrying in {delay:g} seconds")
+            raise LLMError(f"The model exceeded the total time limit (last problem: {last_error}). "
+                           "No more retries were started.") from last_error
+        progress(f"{'Empty model reply' if isinstance(last_error, _EmptyReply) else 'Provider unavailable'}"
+                 f" — retrying in {delay:g} seconds")
         time.sleep(delay)
 
+
+def _answer(body, nvidia: bool) -> str:
+    """The answer text, or _EmptyReply for the 200 replies providers say to retry."""
     try:
         choice = body["choices"][0]
         message = choice["message"]
         content = message.get("content")
     except (KeyError, IndexError, TypeError, AttributeError) as exc:
-        raise LLMError("Unexpected LLM response shape: an answer message was missing.") from exc
+        # OpenRouter reports some upstream failures as a 200 with a top-level error.
+        error = body.get("error") if isinstance(body, dict) else None
+        detail = error.get("message") if isinstance(error, dict) else None
+        raise _EmptyReply(f"a provider error: {detail}" if detail else "a reply without an answer message") from exc
+    finish = choice.get("finish_reason")
+    # OpenRouter: a provider that fails mid-answer sends finish_reason "error"
+    # with partial content, which must never be parsed as a resume.
+    if finish == "error" or choice.get("error"):
+        error = choice.get("error")
+        detail = error.get("message") if isinstance(error, dict) else None
+        raise _EmptyReply(f"a provider failure mid-answer: {detail or 'no detail'}")
     # A resume cut off at the token ceiling still parses as a valid document,
     # so the only place to catch it is here.
-    if choice.get("finish_reason") == "length":
+    if finish == "length":
         raise LLMError(
             "The model hit its output limit and the resume is incomplete. "
             "Raise LLM_MAX_TOKENS (currently "
             f"{os.environ.get('LLM_MAX_TOKENS', 'unset')}) and try again."
         )
-    if choice.get("finish_reason") in {"content_filter", "tool_calls", "function_call"}:
+    # Gemini's intermittent SAFETY/RECITATION stops arrive as content_filter.
+    if finish == "content_filter":
+        raise _EmptyReply(f"a content-filter stop ({choice.get('native_finish_reason') or 'no detail'})")
+    if finish in {"tool_calls", "function_call"}:
         raise LLMError("The provider did not return a complete resume answer.")
-    if not isinstance(content, str) or not content.strip():
-        raise LLMError(
-            "LLM returned no answer content (only reasoning or an empty message). "
-            "Try again, or set NVIDIA_ENABLE_THINKING=0."
-        )
-    answer = _strip_think(content)
+    if isinstance(content, list):  # some providers send content parts
+        content = "".join(part.get("text") or "" for part in content if isinstance(part, dict))
+    answer = _strip_think(content) if isinstance(content, str) else ""
     if not answer:
-        raise LLMError("LLM returned only reasoning and no resume answer.")
+        native = choice.get("native_finish_reason") or finish or "none"
+        hint = "; setting NVIDIA_ENABLE_THINKING=0 in .env can help" if nvidia else ""
+        raise _EmptyReply(f"an empty or reasoning-only reply (finish reason {native}{hint})")
     return answer
 
 
@@ -255,8 +288,14 @@ def tailor_resume(
     progress=None,
     missing_keywords: list[str] | tuple[str, ...] = (),
     polish: bool = False,
+    validate=None,
 ) -> TailorResult:
-    """One tailoring answer; a polish pass may leave an already-tailored resume as is."""
+    """One tailoring answer; a polish pass may leave an already-tailored resume as is.
+
+    `validate(draft)` returns the hard check failures of a draft; like dropped
+    content, they get one corrective retry. If the retry itself fails, a first
+    reply whose only problem was restorable dropped points is used instead.
+    """
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -272,29 +311,65 @@ def tailor_resume(
     deadline = time.monotonic() + _positive_seconds(
         os.environ.get("LLM_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT)
     )
+    fallback = None
+
+    def use_fallback():
+        return replace(fallback, restored=(*fallback.restored, "The corrective retry failed, so the first reply "
+                                           "was used with its dropped points restored."))
+
     for attempt in range(2):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if fallback:
+                return use_fallback()
             raise LLMError("The model exceeded the total time limit before a usable resume was returned.")
-        raw = complete_fn(
-            messages,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            temperature=temperature,
-            progress=progress,
-            total_timeout=remaining,
-        )
+        try:
+            raw = complete_fn(
+                messages,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                temperature=temperature,
+                progress=progress,
+                total_timeout=remaining,
+            )
+        except LLMError:
+            if fallback is None:
+                raise
+            return use_fallback()
         try:
             result = parse_model_output(raw)
-            omissions = content_preservation_issues(resume_markdown, result.resume_markdown)
+            if not re.search(r"(?m)^\s*•", resume_markdown):  # typed • lines in the source stay text
+                result = replace(result, resume_markdown=re.sub(r"(?m)^(\s*)•\s+", r"\1- ", result.resume_markdown))
+            # Reworded fixed facts and dropped skills go straight back. Dropped points
+            # get the corrective retry first, since the model rewrites them better
+            # than a restored original; the retry's leftovers are restored.
+            draft, kept = restore_frozen(resume_markdown, result.resume_markdown)
+            draft, restored = restore_content(resume_markdown, draft, points=bool(attempt))
+            final = replace(result, resume_markdown=draft, restored=(*kept, *restored), kept_facts=bool(kept))
+            omissions = content_preservation_issues(resume_markdown, draft, allow_merges=bool(attempt))
             if omissions:
-                raise LLMError("Content was removed: " + "; ".join(omissions))
-            if not polish and not has_resume_changes(resume_markdown, result.resume_markdown):
+                problems = omissions
+                if not attempt:
+                    whole, more = restore_content(resume_markdown, draft, points=True)
+                    violations = validate(whole) if validate else []
+                    # The retry hears every problem, not just the first found.
+                    problems = [*omissions, *violations]
+                    if not (content_preservation_issues(resume_markdown, whole, allow_merges=True) or violations
+                            or (not polish and _only_deletions(resume_markdown, result.resume_markdown))):
+                        fallback = replace(final, resume_markdown=whole, restored=(*final.restored, *more))
+                raise LLMError("Content was removed: " + "; ".join(problems))
+            if not polish and (not has_resume_changes(resume_markdown, draft)
+                               or _only_deletions(resume_markdown, result.resume_markdown)):
                 raise LLMError("The model returned the original resume without any content changes.")
-            return result
+            violations = validate(draft) if validate else []
+            if violations and not attempt:
+                raise LLMError("Checks failed: " + "; ".join(violations))
+            return use_fallback() if violations and fallback else final
         except LLMError as exc:
             if attempt:
+                if fallback:
+                    return use_fallback()
                 raise LLMError(f"The model did not produce a usable tailored resume after one corrective retry: {exc}") from exc
             if progress:
                 progress("Requesting a corrected response because the model returned unchanged, incomplete, or invalid output")
@@ -307,6 +382,14 @@ def tailor_resume(
                 "and relevant experience. Keep at least the original number of bullets in each role and summary, "
                 "and retain all existing skills while adding relevant skills. Preserve the protected identity and history fields."
             )}]
+
+
+def _only_deletions(original: str, reply: str) -> bool:
+    """The reply only removed words from the original: an echo, not tailoring."""
+    def words(text):
+        return re.findall(r"\w+", "\n".join(block.text for block in from_markdown(text)).lower())
+    return all(tag in ("equal", "delete") for tag, *_ in
+               difflib.SequenceMatcher(None, words(original), words(reply), autojunk=False).get_opcodes())
 
 
 def _parse_match(chunk: str) -> tuple[int | None, str]:
@@ -350,7 +433,8 @@ def parse_model_output(text: str) -> TailorResult:
     match_score, match_line = _parse_match(match_chunk)
     if not match_line:
         raise LLMError("Model output had an empty MATCH section.")
-    resume_markdown = _strip_wrapping_fence(resume_chunk).strip()
+    # "* " bullets are bullets too; the checks and Word writer expect "- ".
+    resume_markdown = re.sub(r"(?m)^(\s*)\*\s+", r"\1- ", _strip_wrapping_fence(resume_chunk).strip())
     if not resume_markdown:
         raise LLMError("Model output had an empty RESUME section.")
     return TailorResult(

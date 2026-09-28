@@ -463,3 +463,26 @@ def test_history_handles_interrupted_malformed_and_non_directory_entries(api, tm
 def test_removed_review_and_reset_endpoints_stay_removed(api):
     assert api("POST", "/api/review/" + "a" * 32, {"reviewed": True})[0] == 404
     assert api("POST", "/api/reset", {})[0] == 404
+
+
+def test_reattaching_the_same_file_reuses_its_saved_entry(api):
+    upload = with_resume({"jd": "Python"})
+    _, first = api("POST", "/api/tailor", upload)
+    _, again = api("POST", "/api/tailor", {**upload, "jd": "Java"})
+    assert first["ok"] and again["ok"] and again["resume_id"] == first["resume_id"]
+    assert len(api("GET", "/api/library")[1]["resumes"]) == 1
+    _, renamed = api("POST", "/api/tailor", {**upload, "resume_name": "other.docx"})
+    assert renamed["resume_id"] != first["resume_id"]
+    assert len(api("GET", "/api/library")[1]["resumes"]) == 2
+
+
+def test_a_blocked_progress_write_never_fails_the_run(api, monkeypatch):
+    # Windows refuses to replace status.json while a status poll has it open.
+    real = server.write_text
+    def blocked(dest, text, **kwargs):
+        if dest.name == "status.json" and '"working"' in text and "Preparing the source" not in text:
+            raise PermissionError(5, "Access is denied")
+        return real(dest, text, **kwargs)
+    monkeypatch.setattr(server, "write_text", blocked)
+    status, result = api("POST", "/api/tailor", {"jd": "Python"})
+    assert status == 200 and result["ok"] and result["download"]

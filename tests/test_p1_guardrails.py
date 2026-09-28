@@ -8,8 +8,18 @@ from tests.helpers import PIPE_RESUME
     ("Jan 2024 – Present", "Mar 2020 – Dec 2023"),
     ("Senior Widget Engineer (SAMPLE)", "Data Tinkerer (SAMPLE)"),
 ])
-def test_swapping_real_facts_between_jobs_is_blocked(original, replacement):
+def test_facts_swapped_between_jobs_go_back_to_their_own_job(original, replacement):
     changed = PIPE_RESUME.replace(original, "TEMP_SWAP").replace(replacement, original).replace("TEMP_SWAP", replacement)
+    fixed, report = apply_guardrails(PIPE_RESUME, changed)
+    assert report.ok and fixed == PIPE_RESUME
+    assert any("Kept your original" in item for item in report.warnings)
+
+
+def test_reordered_jobs_are_not_relabelled():
+    first = PIPE_RESUME.index("### ")
+    second = PIPE_RESUME.index("### ", first + 1)
+    end = PIPE_RESUME.index("## ", second + 4)
+    changed = PIPE_RESUME[:first] + PIPE_RESUME[second:end] + PIPE_RESUME[first:second] + PIPE_RESUME[end:]
     _, report = apply_guardrails(PIPE_RESUME, changed)
     assert not report.ok
     assert any("facts together" in item for item in report.violations)
@@ -19,9 +29,9 @@ def test_swapping_real_facts_between_jobs_is_blocked(original, replacement):
 def test_qualifications_are_protected_in_both_directions(heading):
     base = PIPE_RESUME.replace("## Education", f"## {heading}")
     changed = base + "- Master of Science in Computing\n"
-    _, report = apply_guardrails(base, changed)
-    assert not report.ok
-    assert any("qualifications" in item for item in report.violations)
+    fixed, report = apply_guardrails(base, changed)
+    assert report.ok and fixed == base
+    assert any(f"Kept your {heading} section" in item for item in report.warnings)
 
 
 @pytest.mark.parametrize("claim", ["with latency of 7 ms", "processing 20 document types"])

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path
 import os
 import tempfile
+import time
 import uuid
 
 
@@ -35,9 +36,22 @@ def atomic_output(dest: Path, *, sources: Sequence[Path] = ()):
     try:
         yield staging
         check_output_paths(sources, [target])
-        os.replace(staging, target)
+        _replace(staging, target)
     finally:
         staging.unlink(missing_ok=True)
+
+
+def _replace(staging: Path, target: Path, attempts: int = 40) -> None:
+    """os.replace, retried while Windows refuses to replace a file another request
+    has open (a status poll reading status.json); such a read lasts milliseconds."""
+    for attempt in range(attempts):
+        try:
+            os.replace(staging, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.05)
 
 
 def write_text(dest: Path, text: str, *, sources: Sequence[Path] = ()) -> None:

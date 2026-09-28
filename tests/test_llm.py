@@ -146,6 +146,7 @@ def test_repeated_unchanged_output_is_a_failure():
 @pytest.mark.parametrize("content", ["<think>unfinished", "<think>reasoning only</think>", "reasoning</think>answer"])
 def test_reasoning_only_or_unbalanced_output_is_never_an_answer(monkeypatch, content):
     monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: response(content))
+    monkeypatch.setattr(llm, "RETRY_BACKOFF_SECONDS", (0, 0))
     with pytest.raises(llm.LLMError, match="reasoning"):
         llm.complete([], api_key="fake")
 
@@ -157,3 +158,76 @@ def test_invalid_provider_configuration_fails_before_request(monkeypatch, settin
     monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: pytest.fail("invalid settings must not reach provider"))
     with pytest.raises(llm.LLMError):
         llm.complete([], api_key="fake")
+
+
+def test_empty_reply_is_retried_then_accepted(monkeypatch):
+    replies, progress = iter([response(None, finish_reason="stop"), response("answer")]), []
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: next(replies))
+    monkeypatch.setattr(llm, "RETRY_BACKOFF_SECONDS", (0, 0))
+    assert llm.complete([], api_key="fake", progress=progress.append) == "answer"
+    assert any("Empty model reply" in text for text in progress)
+
+
+def test_mid_answer_provider_error_is_never_parsed_as_a_resume(monkeypatch):
+    # OpenRouter reports a provider that died mid-answer as HTTP 200 with partial content.
+    partial = response("===CHANGELOG===\n- half", finish_reason="error",
+                       error={"code": 502, "message": "Provider disconnected"})
+    replies = iter([partial, response("answer")])
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: next(replies))
+    monkeypatch.setattr(llm, "RETRY_BACKOFF_SECONDS", (0, 0))
+    assert llm.complete([], api_key="fake") == "answer"
+
+
+def test_top_level_error_in_a_200_is_retried_and_reported(monkeypatch):
+    calls = []
+    def request(*args, **kwargs):
+        calls.append(1)
+        return closing(io.BytesIO(json.dumps({"error": {"message": "upstream overloaded", "code": 502}}).encode()))
+    monkeypatch.setattr(llm.urllib.request, "urlopen", request)
+    monkeypatch.setattr(llm, "RETRY_BACKOFF_SECONDS", (0, 0))
+    with pytest.raises(llm.LLMError, match="upstream overloaded"):
+        llm.complete([], api_key="fake")
+    assert len(calls) == llm.MAX_ATTEMPTS
+
+
+@pytest.mark.parametrize("base_url,hint", [("https://openrouter.ai/api/v1", False),
+                                           ("https://integrate.api.nvidia.com/v1", True)])
+def test_repeated_empty_replies_name_the_model_and_only_nvidia_gets_the_thinking_hint(monkeypatch, base_url, hint):
+    monkeypatch.setattr(llm.urllib.request, "urlopen",
+                        lambda *a, **k: response("", finish_reason="stop", native_finish_reason="STOP"))
+    monkeypatch.setattr(llm, "RETRY_BACKOFF_SECONDS", (0, 0))
+    with pytest.raises(llm.LLMError) as failure:
+        llm.complete([], api_key="fake", base_url=base_url, model="vendor/model-x")
+    message = str(failure.value)
+    assert "vendor/model-x did not return a usable answer in 3 attempts" in message and "STOP" in message
+    assert ("NVIDIA_ENABLE_THINKING" in message) == hint
+
+
+def test_content_filter_stop_is_retried(monkeypatch):
+    replies = iter([response(None, finish_reason="content_filter", native_finish_reason="RECITATION"), response("answer")])
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: next(replies))
+    monkeypatch.setattr(llm, "RETRY_BACKOFF_SECONDS", (0, 0))
+    assert llm.complete([], api_key="fake") == "answer"
+
+
+def test_deadline_after_an_empty_reply_names_the_empty_reply(monkeypatch):
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda *a, **k: response(""))
+    with pytest.raises(llm.LLMError, match=r"time limit \(last problem: an empty or reasoning-only reply"):
+        llm.complete([], api_key="fake", total_timeout=1)
+
+
+def test_star_bullets_become_dash_bullets_but_bold_and_italic_lines_stay():
+    reply = pack_model_output(changelog=["x"], match="good: y",
+                              resume="# Test\n\n## Summary\n* First point\n**Bold title**\n*Jan 2020 – Present*")
+    assert llm.parse_model_output(reply).resume_markdown.splitlines()[3:] == [
+        "- First point", "**Bold title**", "*Jan 2020 – Present*"]
+
+
+@pytest.mark.parametrize("source_uses_dots", [False, True])
+def test_dot_bullets_become_dash_bullets_unless_the_source_types_them(source_uses_dots):
+    base = "# Test\n\n## Summary\n" + ("•\tBuilt Python services.\n" if source_uses_dots else "- Built Python services.\n")
+    reply = pack_model_output(changelog=["x"], match="good: y", resume="# Test\n\n## Summary\n• Built AWS Python services.")
+    result = llm.tailor_resume(resume_markdown=base, job_description="AWS", api_key="fake",
+                               complete_fn=lambda *a, **k: reply)
+    assert result.resume_markdown.splitlines()[3] == ("• Built AWS Python services." if source_uses_dots
+                                                      else "- Built AWS Python services.")
