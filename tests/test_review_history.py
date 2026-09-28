@@ -42,18 +42,18 @@ def test_unmarked_job_has_the_same_protected_facts_as_the_writer_sees():
     assert extract_facts(unmarked).job_headings == extract_facts(PIPE_RESUME).job_headings
     assert extract_facts(unmarked).titles == extract_facts(PIPE_RESUME).titles
     altered = unmarked.replace("Senior Widget Engineer (SAMPLE)", "Director of Engineering")
-    _, report = apply_guardrails(unmarked, altered)
-    assert not report.ok
-    assert any("facts together" in problem for problem in report.violations)
+    fixed, report = apply_guardrails(unmarked, altered)
+    assert report.ok and fixed == unmarked
+    assert any("Kept your original job title" in warning for warning in report.warnings)
 
 
 @pytest.mark.parametrize("label", ["client", "project", "Client:", "project named"])
 def test_client_and_project_names_cannot_be_changed(label):
     base = PIPE_RESUME.replace("Built fictional Python services.", f"Built Python services for {label} Northstar using Terraform.")
     altered = base.replace(f"{label} Northstar", f"{label} Contoso")
-    _, report = apply_guardrails(base, altered)
-    assert not report.ok
-    assert any("Named clients or projects" in problem for problem in report.violations)
+    fixed, report = apply_guardrails(base, altered)
+    assert report.ok and fixed == base
+    assert any("client/project name" in warning for warning in report.warnings)
 
 
 @pytest.mark.parametrize("capability", [
@@ -69,14 +69,14 @@ def test_generic_client_and_project_capabilities_can_be_added(capability):
 
 def test_named_client_is_protected_even_when_followed_by_a_capability():
     base = PIPE_RESUME.replace("Built fictional Python services.", "Built services for client Northstar APIs.")
-    _, report = apply_guardrails(base, base.replace("Northstar APIs", "Contoso APIs"))
-    assert not report.ok
+    fixed, report = apply_guardrails(base, base.replace("Northstar APIs", "Contoso APIs"))
+    assert report.ok and fixed == base
 
 
 def test_explicit_project_name_is_not_treated_as_a_generic_capability():
     base = PIPE_RESUME.replace("Built fictional Python services.", "Built project named Management APIs.")
-    _, report = apply_guardrails(base, base.replace("Management APIs", "Management SDKs"))
-    assert not report.ok
+    fixed, report = apply_guardrails(base, base.replace("Management APIs", "Management SDKs"))
+    assert report.ok and fixed == base
 
 
 def test_rewriting_the_sentence_after_a_client_does_not_rename_the_client():
@@ -89,5 +89,30 @@ def test_rewriting_the_sentence_after_a_client_does_not_rename_the_client():
 @pytest.mark.parametrize("label", ["Client Northstar", "Project Phoenix Migration"])
 def test_standalone_names_are_protected(label):
     base = PIPE_RESUME.replace("Built fictional Python services. No real employer.", label)
-    _, report = apply_guardrails(base, base.replace(label, label.replace("Northstar", "Contoso").replace("Phoenix", "Falcon")))
-    assert not report.ok
+    fixed, report = apply_guardrails(base, base.replace(label, label.replace("Northstar", "Contoso").replace("Phoenix", "Falcon")))
+    assert report.ok and fixed == base
+
+
+@pytest.mark.parametrize("phrase", ["Collaborated with Project Managers and QA.", "Worked with Client Stakeholders on reporting."])
+def test_ordinary_role_words_read_as_names_only_undo_that_line(phrase):
+    altered = PIPE_RESUME.replace("Built fictional Python services.", phrase)
+    fixed, report = apply_guardrails(PIPE_RESUME, altered)
+    assert report.ok and fixed == PIPE_RESUME
+
+
+HEADED = "# Jane Sample\nSr. AI Data Engineer\nDallas, TX\njane@example.invalid | +1 555 010 0000\n\n## Summary\n- Builds data pipelines.\n"
+
+
+@pytest.mark.parametrize("change,restored", [
+    (("Sr. AI Data Engineer", "Senior / Lead AWS Data Engineer"), False),
+    (("Dallas, TX", "Newark, NJ"), True),
+    (("jane@", "janet@"), True),
+    (("# Jane Sample", "# Janet Sample"), True),
+    (("Sr. AI Data Engineer\n", ""), True),
+])
+def test_headline_above_the_contact_line_may_be_retargeted_but_identity_may_not(change, restored):
+    altered = HEADED.replace(*change)
+    fixed, report = apply_guardrails(HEADED, altered)
+    assert report.ok and report.restored_contact == restored
+    expected = HEADED.replace(*change) if change[0] == "Sr. AI Data Engineer" else HEADED
+    assert fixed.split("## ")[0].split() == expected.split("## ")[0].split()

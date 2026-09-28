@@ -75,7 +75,8 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
 
     Wording may change freely; preserve bullet depth and expand existing skills.
     A line that changes a number or claims
-    a new degree/certification gets its original back instead of failing the run.
+    a new degree/certification gets its original back instead of failing the run,
+    and dropped points or skills are put back.
     """
     report = GuardrailReport(ok=True)
     base_n = _normalize(base)
@@ -89,12 +90,25 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
             "Name or contact details were altered by the model; restored from the base resume."
         )
 
-    out, undone = _repair_lines(base_n, out)
+    out, kept = restore_frozen(base_n, out)
+    report.warnings.extend(kept)
+
+    # One repair can strand a number that moved from a sibling line, so repeat.
+    undone: list[str] = []
+    for _ in range(3):
+        out, more = _repair_lines(base_n, out)
+        undone += more
+        if not more:
+            break
     for line in undone:
         report.warnings.append(
-            "Kept your original line because the edit changed a number, added a "
-            f"degree/certification claim, or named a tool released after that role ended: “{line[:70]}…”"
+            "Kept your original line because the edit changed a number, a date, or a client/project name, "
+            "added a degree/certification or location/work-authorization claim, or named a tool released after "
+            f"that role ended: “{line[:70]}…”"
         )
+    # A repair can drop an added point; restoring afterwards keeps the count whole.
+    out, restored = restore_content(base_n, out)
+    report.warnings.extend(restored)
 
     out_facts = extract_facts(out)
     report.violations.extend(_check_bound_facts(base_n, out))
@@ -181,76 +195,428 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
             report.violations.append(
                 f"Numbers or units changed in {section}. Preserve metrics with their original role or section."
             )
-    report.violations.extend(content_preservation_issues(base_n, out))
+    # tailor_resume already spent the corrective retry on merged points.
+    report.violations.extend(content_preservation_issues(base_n, out, allow_merges=True))
     report.ok = not report.violations
     if not out.endswith("\n"):
         out += "\n"
     return out, report
 
 
-def content_preservation_issues(base: str, draft: str) -> list[str]:
-    """Keep resume depth and existing skills while allowing complete JD rewrites."""
-    original, edited = _scopes(base), _scopes(draft)
-    problems = []
+def restore_frozen(base: str, out: str) -> tuple[str, list[str]]:
+    """Put back reworded section headings, job headings and titles, and qualification sections.
 
-    def blocks(items):
-        return from_markdown("\n".join(line for _, line in items))
+    The checks require these to match the original, so when the structure still
+    lines up (same number of sections and of jobs) the original wording goes
+    back instead of failing the run. A changed structure or order is left for the checks.
+    """
+    def layout(text):
+        lines = text.splitlines()
+        return lines, dict(zip((i for i, line in enumerate(lines) if line.strip()), from_markdown(text)))
 
-    for scope, items in original.items():
-        old = blocks(items)
-        heading = old[0] if old else None
-        if not heading or not (heading.kind == JOB or (
-            heading.kind == SECTION and re.search(r"\b(?:summary|profile|objective)\b", heading.text, re.I)
-        )):
+    base_lines, base_blocks = layout(base)
+    lines, blocks = layout(out)
+    notes: list[str] = []
+
+    def at(found, kind):
+        return [i for i, block in found.items() if block.kind == kind]
+
+    def following(found, i):
+        return next((j for j in found if j > i), None)
+
+    def lead(found, i):
+        """Non-bullet lines between a job heading and its first point."""
+        after = [k for k in found if k > i]
+        return [k for k in after[:next((n for n, k in enumerate(after)
+                                         if found[k].kind in (BULLET, JOB, SECTION)), len(after))]]
+
+    aligned = {}
+    for kind, name in ((SECTION, "section heading"), (JOB, "job heading")):
+        old, new = at(base_blocks, kind), at(blocks, kind)
+        before = [_fact_text(base_blocks[i].text) for i in old]
+        after = [_fact_text(blocks[j].text) for j in new]
+        # A reordered section or job is not a rewording: restoring by position
+        # would put the wrong heading over its content. Each changed heading must
+        # resemble its own original more than any other changed one.
+        changed = [k for k in range(len(before)) if len(old) == len(new) and after[k] != before[k]]
+
+        def resembles(k):
+            # A replaced section ("Awards" -> "Selected Projects") is not a rewording;
+            # a renamed one still holds its own content.
+            if _similarity(after[k], before[k]) >= 0.5:
+                return True
+            if kind != SECTION:
+                return False
+            mine = _content_words("\n".join(base_lines[old[k] + 1:next((i for i in old if i > old[k]), len(base_lines))]))
+            theirs = _content_words("\n".join(lines[new[k] + 1:next((j for j in new if j > new[k]), len(lines))]))
+            return len(mine & theirs) >= max(1, 0.3 * min(len(mine), len(theirs)))
+
+        aligned[kind] = len(old) == len(new) and all(
+            max(changed, key=lambda k: _similarity(after[index], before[k])) == index and resembles(index)
+            for index in changed)
+        if not aligned[kind]:
             continue
-        required = sum(block.kind == BULLET for block in old)
-        actual = sum(block.kind == BULLET for block in blocks(edited.get(scope, [])))
-        if actual < required:
+        for i, j in zip(old, new):
+            if before[old.index(i)] != after[new.index(j)]:
+                lines[j] = base_lines[i]
+                notes.append(f"Kept your original {name}: “{base_blocks[i].text}”")
+            ti, tj = following(base_blocks, i), following(blocks, j)
+            # A reworded title, or one that lost its bold, goes back as written, but
+            # only when the lines under the heading still line up one to one: an extra
+            # bold line the model inserted must not be overwritten into a second title.
+            if (kind == JOB and ti is not None and tj is not None and base_blocks[ti].kind == TITLE
+                    and len(lead(base_blocks, i)) == len(lead(blocks, j))
+                    and (blocks[tj].kind == TITLE or _fact_text(blocks[tj].text) == _fact_text(base_blocks[ti].text))
+                    and lines[tj] != base_lines[ti]):
+                if _fact_text(blocks[tj].text) != _fact_text(base_blocks[ti].text):
+                    notes.append(f"Kept your original job title: “{base_blocks[ti].text}”")
+                lines[tj] = base_lines[ti]
+
+    if aligned[SECTION]:
+        old, new = at(base_blocks, SECTION), at(blocks, SECTION)
+        for i, j in reversed(list(zip(old, new))):
+            if not QUALIFICATION_HEADING_RE.search(base_blocks[i].text):
+                continue
+            i_end = next((k for k in old if k > i), len(base_lines))
+            j_end = next((k for k in new if k > j), len(lines))
+            if _fact_text("\n".join(base_lines[i + 1:i_end])) != _fact_text("\n".join(lines[j + 1:j_end])):
+                lines[j + 1:j_end] = base_lines[i + 1:i_end]
+                notes.append(f"Kept your {base_blocks[i].text} section exactly as written.")
+    if not notes and lines == out.splitlines():
+        return out, []
+    return "\n".join(lines) + ("\n" if out.endswith("\n") else ""), notes
+
+
+def content_preservation_issues(base: str, draft: str, *, allow_merges: bool = False) -> list[str]:
+    """Keep resume depth and existing skills while allowing complete JD rewrites.
+
+    With allow_merges, an original point whose words live on inside another point
+    of the same role counts as kept (used once the corrective retry is spent).
+    """
+    original, edited = _scopes(base), _scopes(draft)
+    base_lines, lines = base.splitlines(), draft.splitlines()
+    problems = []
+    for scope, items in _point_scopes(original):
+        old = [number - 1 for number in _bullet_numbers(items)]
+        new = [number - 1 for number in _bullet_numbers(edited.get(scope, []))]
+        kept = len(new) + (len(_merged_points(base_lines, old, lines, new))
+                           if allow_merges and 0 < len(new) < len(old) else 0)
+        if kept < len(old):
             problems.append(
-                f"Bullet count dropped in {scope}: expected at least {required}, found {actual}. "
+                f"Bullet count dropped in {scope}: expected at least {len(old)}, found {len(new)}. "
                 "Rewrite the existing points instead of removing or combining them."
             )
-
-    def skill_lines(scopes):
-        for items in scopes.values():
-            parsed = blocks(items)
-            if parsed and parsed[0].kind == SECTION and re.search(
-                r"\b(?:skills?|competenc\w*|expertise|proficienc\w*)\b|\b(?:technical|technology|tech) stack\b",
-                parsed[0].text, re.I,
-            ):
-                yield from (block.text for block in parsed[1:])
-
-    # ponytail: explicit skill lists, not semantic aliases; preserve original names.
-    # Parentheses split grouped tools such as AWS (EC2, S3), without losing AWS.
-    existing = {}
-    category_words = set("""programming scripting processing languages tools technologies
-        technology technical skills services platforms cloud data databases analytics
-        engineering architecture quality operations devops development frameworks
-        libraries competencies expertise governance and & /""".split())
-    for line in skill_lines(original):
-        label, separator, values = line.partition(":")
-        if separator:
-            # Keep tool names used as labels (AWS, SQL Server), not generic categories.
-            label_words = label.split()
-            while label_words and label_words[0].casefold() in category_words:
-                label_words.pop(0)
-            while label_words and label_words[-1].casefold() in category_words:
-                label_words.pop()
-            values = ", ".join([" ".join(label_words), values])
-        else:
-            values = label
-        for item in re.split(r"[,;()\n]|\s+[|/•]\s+", values):
-            item = re.sub(r"^(?:and|or|&)\s+", "", item.strip(), flags=re.I).strip(" .")
-            key = re.sub(r"\s+", " ", item.translate(_TYPOGRAPHY)).casefold()
-            if key:
-                existing.setdefault(key, item)
-    available = re.sub(r"\s+", " ", "\n".join(skill_lines(edited)).translate(_TYPOGRAPHY)).casefold()
-    missing = [label for key, label in existing.items()
-               if not re.search(rf"(?<![\w+#]){re.escape(key)}(?![\w+#])", available)]
+    missing = [item for item, _ in _missing_skills(original, edited)]
     if missing:
         problems.append("Existing skills were removed from the skills sections: " + ", ".join(missing)
                         + ". Preserve them while adding job-relevant skills.")
     return problems
+
+
+def restore_content(base: str, draft: str, *, points: bool = True) -> tuple[str, list[str]]:
+    """Put back skills, and optionally points, that the model dropped.
+
+    Skills are only ever appended to the end of a line in their own skills
+    section: the line with their original label, else the line holding most of
+    their surviving original names, else one reworded from their original line;
+    otherwise their original label returns as a new line with just the missing
+    names. A point returns after the nearest original line of its role that
+    survived, never past a sub-heading ("Client: ...") the draft lost, unless it
+    merged into another point of the role (noted, not repeated), moved to
+    another role, or its numbers live on elsewhere in the role: repeating those
+    would duplicate a claim, so content_preservation_issues keeps reporting them.
+    An emptied section or role is left to the corrective retry.
+    """
+    original, edited = _scopes(base), _scopes(draft)
+    base_lines, lines = base.splitlines(), draft.splitlines()
+    inserts: dict[int, list[tuple[int, str]]] = {}  # draft index -> (base index, line) placed after it
+    notes: list[str] = []
+
+    targets = _skill_lines(edited)
+    available = _skill_key("\n".join(text for _, _, text in targets))
+    groups: dict[tuple[str, int, str], list[str]] = {}
+    for item, (scope, number, source) in _missing_skills(original, edited):
+        groups.setdefault((scope, number, source), []).append(item)
+    restored: list[str] = []
+    for (scope, number, source), items in groups.items():
+        section = [(n, text) for s, n, text in targets if s == scope]
+        if not section:
+            continue
+        restored += items
+        # Names another original line also lists say nothing about where this line went.
+        elsewhere = {_skill_key(name) for _, n, text in _skill_lines(original) if n != number
+                     for name in _skill_items(text)}
+        names = {_skill_key(name) for name in _skill_items(source)} - elsewhere
+        survivors = {name for name in names if _has_skill(name, available)}
+        label = _skill_key(source.partition(":")[0]) if ":" in source else None
+        own = {_skill_key(name) for name in _skill_items(source.partition(":")[0] + ":")} if label else set()
+        listed = [item for item in items if _skill_key(item) not in own]
+
+        def fit(target):
+            text = target[1]
+            held = names & {_skill_key(name) for name in _skill_items(text)}
+            return (label is not None and ":" in text and _skill_key(text.partition(":")[0]) == label,
+                    len(held) >= 2 and len(held) > len(survivors) / 2,
+                    _similarity(_skill_key(source), _skill_key(text)))
+
+        best = max(section, key=fit)
+        same_label, holds_most, similarity = fit(best)
+        # Only label words such as "ETL" are missing: they join the line reworded from theirs.
+        if same_label or holds_most or similarity >= 0.6 or not listed:
+            lines[best[0] - 1] = lines[best[0] - 1].rstrip().rstrip(",;.") + ", " + ", ".join(items)
+            continue
+        raw = base_lines[number - 1]
+        head = re.match(r"\s*(?:[-*]\s+)?" + (r"(?:\*\*)?[^:]*:(?:\*\*)?" if label else ""), raw).group()
+        # The new line goes after the line that preceded it originally, else at the section start.
+        earlier = [text for s, n, text in _skill_lines(original) if s == scope and n < number]
+        anchor = edited[scope][0][0] if not earlier else next(
+            (n for n, text in section if _skill_key(text) == _skill_key(earlier[-1])), section[-1][0])
+        inserts.setdefault(anchor - 1, []).append((number - 1, f"{head.rstrip()} {', '.join(listed)}"))
+    if restored:
+        notes.append("Restored skills the model removed from your skills section: " + ", ".join(restored) + ".")
+
+    if points:
+        roles = {scope for scope, items in _point_scopes(original) if _scope_blocks(items)[0][1].kind == JOB}
+        bullets = {n - 1 for scope in roles for n in _bullet_numbers(edited.get(scope, []))}
+        base_bullets = {n - 1 for scope in roles for n in _bullet_numbers(original[scope])}
+        added = set()  # points a role gained that none of its own originals became
+        for scope in roles:
+            role_old = [n - 1 for n in _bullet_numbers(original[scope])]
+            role_new = [n - 1 for n in _bullet_numbers(edited.get(scope, []))]
+            added |= set(role_new) - set(_pair_rewrites(base_lines, role_old, lines, role_new))
+        for scope, items in _point_scopes(original):
+            old = [number - 1 for number in _bullet_numbers(items)]
+            new = [number - 1 for number in _bullet_numbers(edited.get(scope, []))]
+            if not new or len(new) >= len(old):
+                continue
+            pairs = _pair_rewrites(base_lines, old, lines, new)
+            merged = _merged_points(base_lines, old, lines, new)
+            lost = (Counter(_quantities("\n".join(base_lines[k] for k in old)))
+                    - Counter(_quantities("\n".join(lines[j] for j in new))))
+
+            def moved(i):
+                # Copied or reworded into another role. A boilerplate point that was
+                # already in another role before is not a move.
+                if scope not in roles:
+                    return False
+                words = _content_words(base_lines[i])
+                return (sum(_similarity(base_lines[i], lines[j]) >= 0.8 for j in bullets - set(new))
+                        > sum(_similarity(base_lines[i], base_lines[k]) >= 0.8 for k in base_bullets - set(old))
+                        or (len(words) >= 3 and any(len(words & _content_words(lines[j])) >= 0.6 * len(words)
+                                                    for j in added - set(new))))
+
+            def numbers_live_on(i):
+                quantities = Counter(_quantities(base_lines[i]))
+                return bool(quantities) and not quantities & lost
+
+            notes += [f"The model merged an original point into another one in {scope}: “{base_lines[i].strip()[2:][:70]}…”"
+                      for i in sorted(merged)]
+            candidates = [i for i in old if i not in pairs.values() and i not in merged
+                          and not numbers_live_on(i) and not moved(i)]
+            candidates.sort(key=lambda i: max(_similarity(base_lines[i], lines[j]) for j in new))
+            anchors = _role_anchors(items, edited.get(scope, []), pairs)
+            for i in sorted(candidates[:len(old) - len(new) - len(merged)]):
+                anchor = anchors(i)
+                if anchor is None:
+                    continue
+                inserts.setdefault(anchor, []).append((i, base_lines[i]))
+                notes.append(f"Restored an original point the model dropped in {scope}: “{base_lines[i].strip()[2:][:70]}…”")
+    if not notes:
+        return draft, []
+    out = [line for j, text in enumerate(lines) for line in (text, *(extra for _, extra in sorted(inserts.get(j, []))))]
+    return "\n".join(out) + ("\n" if draft.endswith("\n") else ""), notes
+
+
+# A sub-heading that names a client or project, unlike a generic "Responsibilities:".
+_NAMED_HEAD_RE = re.compile(r"(?i:\b(?:client|project|customer|engagement|account|program)\b)|:\s*\**[A-Z]")
+
+
+def _role_anchors(base_items, draft_items, pairs):
+    """For an original point, the draft line to insert it after: the nearest earlier
+    line of its role that survived. Non-bullet lines (title, "Client: ..."
+    sub-headings) are aligned in order; the walk stops at a named one the draft
+    lost, so a point never crosses into another client's points."""
+    base_blocks, draft_blocks = _scope_blocks(base_items), _scope_blocks(draft_items)
+    base_heads = [(n - 1, _fact_text(b.text)) for n, b in base_blocks if b.kind != BULLET]
+    named = {n - 1 for n, b in base_blocks if b.kind != BULLET and _NAMED_HEAD_RE.search(b.text)}
+    draft_heads = [(n - 1, _fact_text(b.text)) for n, b in draft_blocks if b.kind != BULLET]
+    heads = {}
+    matcher = difflib.SequenceMatcher(None, [t for _, t in base_heads], [t for _, t in draft_heads], autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1):
+            heads.update((base_heads[i][0], draft_heads[j][0]) for i, j in zip(range(i1, i2), range(j1, j2)))
+    survivors = {k: j for j, k in pairs.items()}
+    lost_heads = named - set(heads)
+
+    def anchor(i):
+        for k in range(i - 1, base_items[0][0] - 2, -1):
+            if k in survivors or k in heads:
+                return survivors.get(k, heads.get(k))
+            if k in lost_heads:
+                return None
+        return None
+
+    return anchor
+
+
+_STOPWORDS = frozenset("and the for with from into using across that this their over via".split())
+
+
+def _content_words(text: str) -> set[str]:
+    return {re.sub(r"(?:ing|ed|es|s)$", "", word) if len(word) > 4 else word
+            for word in re.findall(r"[a-z0-9+#]{3,}", text.lower()) if word not in _STOPWORDS}
+
+
+def _merged_points(base_lines, old, lines, new) -> set[int]:
+    """Unpaired original points that live on inside a kept point of the role: most
+    of their words, or, in a rewrite that combined them with a sibling point, half
+    their words and nearly all their names ("SQL Server Agent", "ETL")."""
+    pairs = _pair_rewrites(base_lines, old, lines, new)
+    merged = set()
+    for i in old:
+        if i in pairs.values():
+            continue
+        words, names = _content_words(base_lines[i]), _point_names(base_lines[i])
+        for j in new:
+            shared = len(words & _content_words(lines[j]))
+            tokens = set(re.findall(r"[a-z0-9+#]+", lines[j].lower()))
+            if len(words) >= 3 and (shared >= 0.6 * len(words) or (
+                    j in pairs and shared >= 0.5 * len(words) and names and len(names & tokens) >= 0.75 * len(names))):
+                merged.add(i)
+                break
+    return merged
+
+
+def _point_names(line: str) -> set[str]:
+    """Capitalised words and acronyms after a point's first word: its tools and names."""
+    return {word.lower() for word in re.findall(r"\b[A-Z][A-Za-z0-9+#]*", line.strip().lstrip("-*• ").partition(" ")[2])}
+
+
+# Category words in "Cloud Platforms: ..." labels. Tool names used as labels
+# (AWS, SQL Server) are skills too.
+_SKILL_CATEGORY_WORDS = frozenset("""programming scripting processing languages tools technologies
+    technology technical skills services platforms cloud data databases analytics
+    engineering architecture quality operations devops development frameworks
+    libraries competencies expertise governance security storage warehousing
+    orchestration streaming messaging ingestion integration retrieval evaluation
+    monitoring observability automation deployment infrastructure ai ml agentic
+    visualization reporting testing big soft other web core additional key general
+    ecosystem ecosystems methodologies methodology practices packages formats file
+    workflow workflows version source control concepts areas domains environments
+    utilities operating systems servers application applications misc miscellaneous
+    and & /""".split())
+_FILLER = frozenset({"etc", "others", "more", "and more"})
+_SKILL_HEADING_RE = re.compile(
+    r"\b(?:skills?|competenc\w*|expertise|proficienc\w*)\b|\b(?:technical|technology|tech) stack\b", re.I)
+
+
+def _scope_blocks(items):
+    """A scope's blocks, each with its 1-based line number."""
+    return list(zip((number for number, _ in items), from_markdown("\n".join(line for _, line in items))))
+
+
+def _point_scopes(scopes):
+    """Job roles and summary sections (not skills summaries): the scopes whose points must survive."""
+    for scope, items in scopes.items():
+        blocks = _scope_blocks(items)
+        heading = blocks[0][1] if blocks else None
+        if heading and (heading.kind == JOB or (
+            heading.kind == SECTION and re.search(r"\b(?:summary|profile|objective)\b", heading.text, re.I)
+            and not _SKILL_HEADING_RE.search(heading.text)
+        )):
+            yield scope, items
+
+
+def _bullet_numbers(items) -> list[int]:
+    return [number for number, block in _scope_blocks(items) if block.kind == BULLET]
+
+
+def _skill_lines(scopes) -> list[tuple[str, int, str]]:
+    """(section, line number, text) of every line under a skills heading."""
+    found = []
+    for scope, items in scopes.items():
+        blocks = _scope_blocks(items)
+        if blocks and blocks[0][1].kind == SECTION and _SKILL_HEADING_RE.search(blocks[0][1].text):
+            found += [(scope, number, block.text) for number, block in blocks[1:]]
+    return found
+
+
+def _skill_items(line: str) -> list[str]:
+    """Tool and skill names on one skills line, not descriptive phrases.
+
+    Parentheses split AWS (EC2, S3) without losing AWS; a version (v9–v10) or an
+    abbreviation (Secrets Manager (SM)) in them only qualifies the item before.
+    A multi-word phrase with no capital, digit, or symbol after its first letter
+    ("batch and real-time pipelines"), or any phrase over four words, describes
+    work; the model may reword it. What remains of a label is a name only when
+    it has no connector ("Deep Learning & Generative" is a category).
+    """
+    label, separator, values = line.partition(":")
+    dash = None if separator else re.match(r"([^,()]{2,40}?)\s[–—-]\s(.+)", line)  # "Languages – Python, SQL"
+    if dash:
+        label, separator, values = dash.group(1), ":", dash.group(2)
+    if separator:
+        words = label.split()
+
+        def category(word):  # "Cloud/DevOps" is a category; "CI/CD" is a skill
+            return all(part.strip(",;").casefold() in _SKILL_CATEGORY_WORDS for part in word.split("/"))
+
+        while words and category(words[0]):
+            words.pop(0)
+        while words and category(words[-1]):
+            words.pop()
+        head = " ".join(words).strip(",; ")
+        values = ", ".join(["" if re.search(r"[&,]|\b(?:and|or)\b", head, re.I) else head, values])
+    else:
+        values = label
+    items, previous = [], ""
+    for part in re.split(r"[,;()\n]|\s+[|/•]\s+", values):
+        item = re.sub(r"^(?:and|or|&)\s+", "", part.strip(), flags=re.I).strip(" .")
+        if not item or item.casefold() in _FILLER:
+            continue
+        qualifier = re.fullmatch(r"v?\d[\w.–-]*", item, re.I) or (
+            len(item) > 1 and item == "".join(word[0] for word in previous.split()).upper())
+        previous = item
+        if not qualifier and len(item.split()) <= 4 and (" " not in item or re.search(r"[A-Z0-9+#/.]", item[1:])):
+            items.append(item)
+    return items
+
+
+def _skill_key(text: str) -> str:
+    return re.sub(r"\s+", " ", text.translate(_TYPOGRAPHY)).casefold()
+
+
+def _has_skill(key: str, text_key: str):
+    return re.search(rf"(?<![\w+#]){re.escape(key)}(?![\w+#])", text_key)
+
+
+def _missing_skills(original, edited) -> list[tuple[str, tuple[str, int, str]]]:
+    """Original skill names absent from the edited skills lines, with their source line.
+
+    A name survives in parts ("SQL and Scala" as "SQL, Scala") or without a vendor
+    prefix ("AWS Lake Formation" as "Lake Formation"). A name taken from a category
+    label (ETL in "ETL and Data Architecture") survives anywhere in the resume.
+    ponytail: explicit skill lists, not semantic aliases; original names are kept.
+    """
+    available = _skill_key("\n".join(text for _, _, text in _skill_lines(edited)))
+    everywhere = _skill_key("\n".join(line for items in edited.values() for _, line in items))
+    missing: dict[str, tuple[str, tuple[str, int, str]]] = {}
+    seen: set[str] = set()
+    for source in _skill_lines(original):
+        label = source[2].partition(":")[0] + ":" if ":" in source[2] else ""
+        from_label = {_skill_key(name) for name in _skill_items(label)} if label else set()
+        for item in _skill_items(source[2]):
+            key = _skill_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            parts = [part for part in re.split(r"\s*/\s*|\s*&\s*|\s+(?:and|or)\s+", key) if part]
+            bare = re.sub(r"^(?:aws|amazon|azure|microsoft|google|gcp|apache)\s+", "", key)
+            text = everywhere if key in from_label else available
+            if not (_has_skill(key, text) or all(_has_skill(part, text) for part in parts)
+                    or (bare != key and _has_skill(bare, text))):
+                missing[key] = (item, source)
+    return list(missing.values())
 
 
 def _fact_text(text: str) -> str:
@@ -300,20 +666,28 @@ def _quantities(text: str) -> list[str]:
     "11+ years" and "11 years" are the same claim. Named-history/date checks
     protect historical fields independently.
     """
-    number = r"(?<![\w.])\d[\d,]*(?:\.\d+)?"
+    number = r"(?<![\w.])\d(?:[\d,]*\d)?(?:\.\d+)?"
     units = (
         r"ms|seconds?|minutes?|hours?|days?|weeks?|months?|years?|percent|x|"
         r"[kmb]|thousand|million|billion|users?|customers?|clients?|records?|"
         r"models?|engineers?|persons?|people|teams?|documents?|types?|requests?|events?|"
         r"services?|pipelines?|endpoints?|jobs?|tests?|deployments?|transactions?|"
         r"calls?|applications?|projects?|servers?|clusters?|regions?|databases?|"
-        r"terabytes?|gigabytes?|petabytes?|TB|GB|PB"
+        r"terabytes?|gigabytes?|petabytes?|TB|GB|PB|"
+        r"tables?|workflows?|dags?|systems?|reports?|dashboards?|files?|datasets?|feeds?|"
+        r"schemas?|tickets?|defects?|microservices?|integrations?|apis?|queries|query|rows?|nodes?|"
+        r"stakeholders?|members?|vendors?|partners?|products?|features?|releases?|stores?|countries|markets?"
     )
     separator = r"[ \t]*(?:[-‐‑‒–—][ \t]*)?"
-    pattern = rf"[$€£]\s*{number}\s*(?:[kmb]\b|thousand\b|million\b|billion\b)?|{number}\s*\+?{separator}(?:%|(?:{units})\b)|\b\d{{1,3}}(?:,\d{{3}})+\+?"
+    # "40 legacy Informatica workflows" is a count of workflows: up to two words
+    # may sit between a number and its unit, and only the two form the claim.
+    pattern = (rf"[$€£]\s*{number}\s*(?:[kmb]\b|thousand\b|million\b|billion\b)?"
+               rf"|(?P<n>{number})[ \t]*\+?{separator}(?:(?P<pct>%)|(?:[A-Za-z][\w/-]*[ \t]+){{0,2}}?(?P<unit>{units})\b)"
+               rf"|\b\d{{1,3}}(?:,\d{{3}})+\+?")
     quantities = []
     for match in re.finditer(pattern, text, re.I):
-        value = re.sub(r"[\s+\-‐‑‒–—]", "", match.group()).lower()
+        claim = match["n"] + (match["pct"] or match["unit"]) if match["n"] else match.group()
+        value = re.sub(r"[\s+\-‐‑‒–—]", "", claim).lower()
         # "2-hour" and "2 hours" express the same quantity; keep ms intact.
         value = re.sub(r"([a-z]{2,})s$", r"\1", value)
         quantities.append(re.sub(r"people$", "person", value))
@@ -321,7 +695,7 @@ def _quantities(text: str) -> list[str]:
 
 
 def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
-    """Undo changed numbers, new qualifications, and tools newer than a role.
+    """Undo changed numbers, dates, client/project names, new qualifications, and tools newer than a role.
 
     Each edited line is paired with the original it most resembles. A flagged
     edit gets that original back, an added line is dropped, and a deleted
@@ -352,11 +726,35 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
         if in_qualifications:
             qualification_lines.add(j)
 
+    # Dates belong to their own role; client/project names to the resume.
+    role_spans = {scope: {_canon_span(m.group()) for _, line in items for m in DATE_SPAN_RE.finditer(line)}
+                  for scope, items in original.items()}
+    # Job headings are left alone: dropping an invented one would strand its
+    # title and points in another role, so it must stay a hard failure.
+    job_lines = {j for j, block in zip((j for j, line in enumerate(out_lines) if line.strip()), from_markdown(out))
+                 if block.kind == JOB}
+    names = _named_history(base)
+    availability = {claim.lower() for claim in _AVAILABILITY_RE.findall(base)}
+    lost_names = names - _named_history(out)
+    lost_spans = {span for spans in role_spans.values() for span in spans} - {
+        _canon_span(m.group()) for m in DATE_SPAN_RE.finditer(out)}
+
     def new_claim(j):
         # Only an enclosing H2 section freezes qualifications. A job's employer
         # may contain words such as Education or Licensing without being one.
-        return _has_unknown_credential(out_lines[j], known) or (
-            j not in qualification_lines and bool(_degree_levels(out_lines[j]) - degrees))
+        line = out_lines[j]
+        spans = {_canon_span(m.group()) for m in DATE_SPAN_RE.finditer(line)}
+        return (_has_unknown_credential(line, known)
+                or (j not in qualification_lines and bool(_degree_levels(line) - degrees))
+                or bool(spans - role_spans.get(out_scope.get(j + 1), set()))
+                or bool(_named_history(line) - names)
+                or (out_scope.get(j + 1) != "Contact and headline"
+                    and bool({claim.lower() for claim in _AVAILABILITY_RE.findall(line)} - availability)))
+
+    def lost_fact(i):
+        """Original line i names a client/project or date range the edit lost."""
+        return bool(_named_history(base_lines[i]) & lost_names or
+                    {_canon_span(m.group()) for m in DATE_SPAN_RE.finditer(base_lines[i])} & lost_spans)
 
     role_ends = {scope: _role_end_year("\n".join(line for _, line in items))
                  for scope, items in original.items()}
@@ -395,16 +793,36 @@ def _repair_lines(base: str, out: str) -> tuple[str, list[str]]:
             continue
         claims = any(new_claim(j) or too_new(j) for j in range(j1, j2))
         pairs = {}
-        if numbers_moved or claims:
+        if numbers_moved or claims or lost_names or lost_spans:
             # An identical bullet moved to a different role is still an edit.
             # Pair only within that role, including the single-line fallback.
             for scope in dict.fromkeys(out_scope.get(j + 1) for j in range(j1, j2)):
                 old = [i for i in range(i1, i2) if base_scope.get(i + 1) == scope]
                 new = [j for j in range(j1, j2) if out_scope.get(j + 1) == scope]
-                pairs.update(_pair_rewrites(base_lines, old, out_lines, new))
+                found = _pair_rewrites(base_lines, old, out_lines, new)
+                # An original that must come back (its number or fact was lost) takes the
+                # place of the unpaired rewrite sharing most words with it, instead of
+                # returning beside that rewrite and repeating the point.
+                free = [j for j in new if j not in found]
+                for i in old:
+                    if i in found.values() or not (dropped(i, None) or lost_fact(i)):
+                        continue
+                    words = _content_words(base_lines[i])
+                    best = max(free, default=None, key=lambda j: (
+                        len(words & _content_words(out_lines[j])), _similarity(base_lines[i], out_lines[j])))
+                    if best is not None and words & _content_words(out_lines[best]):
+                        found[best] = i
+                        free.remove(best)
+                pairs.update(found)
         for j in range(j1, j2):
             i = pairs.get(j)
-            if gained(j, i) or (i is not None and dropped(i, j)) or new_claim(j) or too_new(j):
+            if j in job_lines:  # restore_frozen and the job checks own headings
+                repaired.append(out_lines[j])
+                continue
+            # A lost name or date returns only through its own rewrite, never
+            # beside an unpaired one, which would repeat the point.
+            if (gained(j, i) or (i is not None and (dropped(i, j) or lost_fact(i)))
+                    or new_claim(j) or too_new(j)):
                 undone.append(out_lines[j].strip())
                 if i is not None:
                     repaired.append(base_lines[i])
@@ -475,17 +893,27 @@ def _role_end_year(markdown: str) -> int | None:
     return None
 
 
+def _similarity(a: str, b: str) -> float:
+    # autojunk would ignore common characters in lines over 200 characters.
+    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
 def _pair_rewrites(base_lines, base_range, out_lines, out_range) -> dict[int, int]:
-    """Pair each edited line with the original it most resembles, most similar first."""
+    """Pair each edited line with the original it most resembles.
+
+    Shared content words rank first, then character similarity; lines that
+    share no content word pair only as the last line left on both sides.
+    """
+    words = {i: _content_words(base_lines[i]) for i in base_range}
     scored = sorted(
-        ((difflib.SequenceMatcher(None, base_lines[i], out_lines[j]).ratio(), i, j)
+        ((len(words[i] & _content_words(out_lines[j])), _similarity(base_lines[i], out_lines[j]), i, j)
          for i in base_range for j in out_range),
         reverse=True,
     )
     pairs: dict[int, int] = {}
     used: set[int] = set()
-    for ratio, i, j in scored:
-        if ratio >= 0.35 and j not in pairs and i not in used:
+    for shared, ratio, i, j in scored:
+        if shared and (ratio >= 0.35 or shared >= 3) and j not in pairs and i not in used:
             pairs[j] = i
             used.add(i)
     rest_i = [i for i in base_range if i not in used]
@@ -721,6 +1149,43 @@ def _last_identity_line(lines: list[str]) -> int:
     return last
 
 
+# A job-title headline between the name and the contact line ("Sr. Data Engineer")
+# may be retargeted like one below it; a location line there may not.
+_HEADLINE_RE = re.compile(
+    r"\b(?:engineer|developer|architect|analyst|scientist|consultant|manager|administrator|"
+    r"specialist|designer|programmer|tester|lead|director)s?\b", re.I)
+
+
+# Header lines the model may not add: a location or a work authorization.
+_STATES = ("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND "
+           "OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC").split()
+_PERSONAL_RE = re.compile(rf",\s*(?:{'|'.join(_STATES)})(?=\s*(?:$|[|·•(),]|\d{{5}}))"
+                          r"|(?i:\b(?:citizen|green card|h-?1b|ead|opt|cpt|visa|authori[sz]\w*"
+                          r"|relocat\w*|remote|hybrid|on-?site|c2c|w-?2|1099)\b)")
+
+
+# Availability claims a body line may not add: a place ("Newark, NJ") or a work
+# authorization. "Hybrid cloud" and "remote teams" are ordinary tailoring.
+_AVAILABILITY_RE = re.compile(rf",\s*(?:{'|'.join(_STATES)})(?=\s*(?:$|[|·•(),.;]|\d{{5}}))"
+                              r"|(?i:\b(?:us citizen|citizenship|green card|h-?1b|visa|sponsorship|work authori[sz]ation"
+                              r"|authori[sz]ed to work|open to relocation|relocat(?:e|ion)|c2c|w-?2|1099)\b)")
+
+
+def _bare_headline(line: str) -> bool:
+    """A job-title line with nothing else on it ("Sr. Data Engineer")."""
+    return bool(line.strip() and _HEADLINE_RE.search(line) and not CONTACT_MARKER_RE.search(line)
+                and not re.search(r"[|·•,]", line))
+
+
+def _identity(lines: list[str]) -> tuple[list[str | None], list[str]]:
+    """Nonblank header lines through the last contact detail, with each bare
+    job-title headline (never the name line) as a None slot whose wording may
+    change. A line that also holds contact details, a location, or other
+    segments ("Engineer | Dallas, TX") stays frozen."""
+    kept = [line for line in lines[:_last_identity_line(lines) + 1] if line.strip()]
+    return [None if index and _bare_headline(line) else line for index, line in enumerate(kept)], kept
+
+
 def _restore_contact(base: str, out: str) -> tuple[str, bool]:
     """Put the name/contact header back if the model altered it.
 
@@ -743,11 +1208,31 @@ def _restore_contact(base: str, out: str) -> tuple[str, bool]:
     # Locate the contact boundary in each header independently. A new headline
     # changes header length; that must not restore the entire old header.
     if boundary >= 0 and out_boundary >= 0:
-        original_identity = base_lines[:boundary + 1]
-        current_identity = out_lines[:out_boundary + 1]
-        if original_identity == current_identity:
+        (original, base_kept), (current, out_kept) = _identity(base_lines), _identity(out_lines)
+        # Below the contact line the model may retarget taglines, but not add a location
+        # or work authorization.
+        base_tail = [line for line in base_lines[boundary + 1:] if line.strip()]
+        out_tail = [line for line in out_lines[out_boundary + 1:] if line.strip()]
+        known = set(base_kept) | set(base_tail)
+
+        def invented(line):  # a location or work authorization the original header lacks
+            return line not in known and bool(_PERSONAL_RE.search(line))
+
+        slots = [line for line, slot in zip(out_kept, current) if slot is None]
+        tail = [line for line in out_tail if not invented(line)]
+        rejected = len(tail) < len(out_tail) or any(invented(line) for line in slots)
+        if rejected:  # what a rejected line displaced comes back
+            tail += [line for line in base_tail if line not in tail]
+        if original == current and not rejected:
             return out, False
-        merged = original_identity + out_lines[out_boundary + 1:]
+        # Name and contact lines come back; the model's headline wording is kept,
+        # wherever it put the headline relative to the contact line.
+        pool = [line for line in slots if not invented(line)] + [line for line in tail if _bare_headline(line)]
+        merged = [slot if slot is not None else (pool.pop(0) if pool else line)
+                  for line, slot in zip(base_kept, original)]
+        merged += pool + [line for line in tail if not _bare_headline(line)]
+        if merged == [line for line in out_lines if line.strip()]:
+            return out, False
         trailing = out_header[len(out_header.rstrip("\n")) :]
         return "\n".join(merged) + trailing + out[len(out_header) :], True
 

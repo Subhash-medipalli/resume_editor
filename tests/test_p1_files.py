@@ -58,3 +58,18 @@ def test_atomic_write_rechecks_links_at_publication(tmp_path):
             staging.write_text("changed")
             dest.symlink_to(source)
     assert source.read_text() == "original"
+
+
+def test_replace_waits_out_a_windows_reader_holding_the_file(tmp_path, monkeypatch):
+    import os
+    from resume_tailor import files
+    real, calls = os.replace, []
+    def flaky(src, dst):
+        calls.append(dst)
+        if len(calls) < 3:
+            raise PermissionError(5, "Access is denied")
+        real(src, dst)
+    monkeypatch.setattr(files.os, "replace", flaky)
+    monkeypatch.setattr(files.time, "sleep", lambda seconds: None)
+    files.write_text(tmp_path / "status.json", "{}")
+    assert (tmp_path / "status.json").read_text() == "{}" and len(calls) == 3

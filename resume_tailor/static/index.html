@@ -32,8 +32,9 @@
     .btn.big { padding:18px 28px; font-size:17px; }
     input[type=file] { display:none; }
     .fileline { margin-top:12px; font-size:14px; color:var(--muted); }
-    .history h2 { font-size:13px; margin:0 0 8px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
-    .history ul + h2 { margin-top:18px; }
+    .history summary { cursor:pointer; font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+    .history details[open] > summary { margin-bottom:8px; }
+    .history details + details { margin-top:14px; padding-top:14px; border-top:1px solid var(--line); }
     .history ul { list-style:none; padding:0; margin:0; }
     .history li { display:flex; justify-content:space-between; gap:12px; align-items:baseline; padding:6px 0; border-top:1px solid var(--line); font-size:14px; }
     .history li:first-child { border-top:0; }
@@ -83,10 +84,14 @@
   </header>
 
   <section class="card history" aria-label="Saved resumes and previous jobs">
-    <h2>Saved resumes</h2>
-    <ul id="resumes"></ul>
-    <h2>Previous jobs</h2>
-    <ul id="runs"></ul>
+    <details>
+      <summary>Saved resumes <span id="resumesCount"></span></summary>
+      <ul id="resumes"></ul>
+    </details>
+    <details>
+      <summary>Previous jobs <span id="runsCount"></span></summary>
+      <ul id="runs"></ul>
+    </details>
   </section>
 
   <!-- 1. enter -->
@@ -165,6 +170,7 @@
   function renderResumes(items) {
     const ul = $("resumes");
     ul.textContent = "";
+    $("resumesCount").textContent = items.length ? "(" + (items.length >= 50 ? "50+" : items.length) + ")" : "";
     if (!items.length) {
       const li = document.createElement("li");
       li.className = "empty";
@@ -192,6 +198,7 @@
   function renderRuns(items) {
     const ul = $("runs");
     ul.textContent = "";
+    $("runsCount").textContent = items.length ? "(" + (items.length >= 50 ? "50+" : items.length) + ")" : "";
     if (!items.length) {
       const li = document.createElement("li");
       li.className = "empty";

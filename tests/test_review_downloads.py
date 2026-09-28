@@ -176,12 +176,13 @@ def test_download_keeps_scrum_master_role_with_spacing_variants(tailor, separato
 
 
 @pytest.mark.parametrize("section", ["Education", "Academic Qualifications", "Professional Credentials"])
-def test_degree_changes_inside_qualification_sections_have_no_download(tailor, section):
-    result, out_dir = tailor(
+def test_degree_changes_inside_qualification_sections_restore_the_original(tailor, section):
+    result, _ = tailor(
         lambda base: _add_skill(base).replace("B.S. Computing", "PhD in Computing"),
         education_section=section,
     )
-    _assert_not_downloadable(result, out_dir)
+    text = _assert_repaired(result)
+    assert "B.S. Computing" in text and "PhD" not in text
 
 
 def test_download_restores_separate_contact_url(tailor):
@@ -201,9 +202,10 @@ def test_unmarked_new_job_in_summary_has_no_download(tailor, prefix, suffix):
     _assert_not_downloadable(result, out_dir)
 
 
-def test_changed_unpunctuated_client_name_has_no_download(tailor):
-    result, out_dir = tailor(lambda base: _add_skill(base).replace("client Northstar", "client Contoso"))
-    _assert_not_downloadable(result, out_dir)
+def test_changed_unpunctuated_client_name_is_restored(tailor):
+    result, _ = tailor(lambda base: _add_skill(base).replace("client Northstar", "client Contoso"))
+    text = _assert_repaired(result)
+    assert "client Northstar" in text and "Contoso" not in text
 
 
 def test_download_keeps_first_pass_when_polish_swaps_keywords(tailor):

@@ -92,12 +92,14 @@ def _download(result):
 
 
 @pytest.mark.parametrize("omission", ["role_bullet", "summary_bullet", "skill"])
-def test_content_omission_retries_then_downloads_complete_resume(content_run, omission):
+def test_dropped_content_is_restored(content_run, omission):
+    # A dropped skill goes straight back; a dropped point first gets the corrective retry.
     draft, run = content_run
-    result, _, requests = run([_omit_content(draft, omission), draft])
+    incomplete = _omit_content(draft, omission)
+    result, _, requests = run([incomplete, incomplete])
 
-    assert len(requests) == 2
-    assert "Content was removed" in requests[1][-1]["content"]
+    assert len(requests) == (1 if omission == "skill" else 2)
+    assert any(warning.startswith("Restored") for warning in result["warnings"])
     document = _download(result)
     bullets = [p.text for p in document.paragraphs if p.style.name == "List Bullet"]
     assert len(bullets) == 7
@@ -107,13 +109,14 @@ def test_content_omission_retries_then_downloads_complete_resume(content_run, om
     assert any("Azure DevOps" in p.text and "Terraform" in p.text for p in document.paragraphs)
 
 
-@pytest.mark.parametrize("omission", ["role_bullet", "summary_bullet", "skill"])
-def test_exhausted_content_retry_publishes_no_download(content_run, omission):
+def test_emptied_role_retries_then_publishes_no_download(content_run):
     draft, run = content_run
-    incomplete = _omit_content(draft, omission)
-    result, out_dir, requests = run([incomplete, incomplete])
+    emptied = draft.replace("\n- Developed SQL reports for analysts.", "").replace(
+        "\n- Validated incoming data and resolved quality issues.", "")
+    result, out_dir, requests = run([emptied, emptied])
 
     assert len(requests) == 2
+    assert "Content was removed" in requests[1][-1]["content"]
     assert not result["ok"]
     assert "Content was removed" in result["error"]
     assert not (out_dir / "result.json").exists()
@@ -125,11 +128,18 @@ def test_exhausted_content_retry_publishes_no_download(content_run, omission):
 def test_polish_cannot_remove_first_pass_added_skill_even_outside_jd(content_run):
     draft, run = content_run
     incomplete_polish = draft.replace(", Terraform", "")
-    result, _, requests = run([draft, incomplete_polish, incomplete_polish], two_pass=True)
+    result, _, requests = run([draft, incomplete_polish], two_pass=True)
 
-    assert len(requests) == 3
-    assert result["polish_error"]
-    assert "Terraform" in result["polish_error"]
+    assert len(requests) == 2
+    assert any("Terraform" in warning for warning in result["warnings"])
     document = _download(result)
     assert any("Terraform" in p.text for p in document.paragraphs)
     assert "Terraform" not in result["coverage"]["matched"]
+
+
+def test_two_pass_keeps_the_first_pass_restore_warnings(content_run):
+    draft, run = content_run
+    result, _, requests = run([draft.replace(", Azure DevOps", ""), draft], two_pass=True)
+    assert len(requests) == 2 and not result["polish_error"]
+    assert any(warning.startswith("Restored skills") and "Azure DevOps" in warning for warning in result["warnings"])
+    assert any("Azure DevOps" in p.text for p in _download(result).paragraphs)

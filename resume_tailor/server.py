@@ -107,6 +107,14 @@ def _decode_upload(payload: dict) -> tuple[str, str, bytes]:
 
 
 def _store_library_resume(filename: str, data: bytes, original_name: str) -> str:
+    # Attaching the same file again reuses its entry instead of adding a copy.
+    digest, now = hashlib.sha256(data).hexdigest(), datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for item in _list_resumes():
+        if item["sha256"] == digest and item["original_name"] == Path(original_name).name:
+            meta_path = _library_root() / item["id"] / "meta.json"
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            write_text(meta_path, json.dumps({**meta, "saved_at": now}))
+            return item["id"]
     resume_id = uuid.uuid4().hex
     folder = _library_root() / resume_id
     folder.mkdir(parents=True, mode=0o700)
@@ -117,7 +125,7 @@ def _store_library_resume(filename: str, data: bytes, original_name: str) -> str
         "id": resume_id,
         "filename": safe,
         "original_name": Path(original_name).name,
-        "saved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "saved_at": now,
         "bytes": len(data),
     }))
     return resume_id
@@ -209,15 +217,27 @@ def _list_resumes() -> list[dict]:
                 or not filename.lower().endswith(".docx")
                 or (folder / filename).is_symlink() or not (folder / filename).is_file()):
             continue
+        try:
+            digest = hashlib.sha256((folder / filename).read_bytes()).hexdigest()
+        except OSError:
+            continue
         items.append({
             "id": folder.name,
+            "sha256": digest,
             "filename": meta.get("filename") if isinstance(meta.get("filename"), str) else "",
             "original_name": meta.get("original_name") if isinstance(meta.get("original_name"), str) else meta.get("filename"),
             "saved_at": meta.get("saved_at") if isinstance(meta.get("saved_at"), str) else "",
             "bytes": meta.get("bytes") if isinstance(meta.get("bytes"), int) else None,
         })
     items.sort(key=lambda item: item["saved_at"], reverse=True)
-    return items[:50]
+    # Older uploads of an identical file under the same name add nothing to the list.
+    unique, seen = [], set()
+    for item in items:
+        key = (item["original_name"], item["sha256"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique[:50]
 
 
 def _list_runs() -> list[dict]:
@@ -293,12 +313,21 @@ def _execute_run(
         api_key=api_key, base_url=os.environ.get("LLM_BASE_URL", "").strip() or DEFAULT_BASE_URL,
         model=os.environ.get("LLM_MODEL", "").strip() or DEFAULT_MODEL,
         complete_fn=complete,
-        progress=lambda message: write_text(out_dir / "status.json", json.dumps({"state": "working", "message": message})),
+        progress=lambda message: _write_progress(out_dir, message),
         two_pass=two_pass,
     )
     if result["ok"]:
         result["download"] = f"/api/download/{out_dir.name}"
     return result
+
+
+def _write_progress(run_dir: Path, message: str) -> None:
+    # Progress text is cosmetic: a failed write must never fail a paid model run.
+    try:
+        with _RUN_STATUS_LOCK:
+            write_text(run_dir / "status.json", json.dumps({"state": "working", "message": message}))
+    except OSError:
+        pass
 
 
 def _finish_run(

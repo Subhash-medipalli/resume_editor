@@ -63,7 +63,8 @@ def test_heading_styles_numbering_and_common_dates_are_preserved(tmp_path, dates
     assert "### Example Company | " + dates in markdown
     assert "- Built Python services." in markdown
     assert apply_guardrails(markdown, markdown)[1].ok
-    assert not apply_guardrails(markdown, markdown.replace(dates, "2015 – 2019"))[1].ok
+    fixed, report = apply_guardrails(markdown, markdown.replace(dates, "2015 – 2019"))
+    assert report.ok and fixed == markdown and "2015" not in fixed
 
 
 @pytest.mark.parametrize("layout", ["header", "columns", "job", "plain"])
