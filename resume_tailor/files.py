@@ -57,3 +57,27 @@ def _replace(staging: Path, target: Path, attempts: int = 40) -> None:
 def write_text(dest: Path, text: str, *, sources: Sequence[Path] = ()) -> None:
     with atomic_output(dest, sources=sources) as staging:
         staging.write_text(text, encoding="utf-8")
+
+
+def save_copy(data: bytes, folder: Path, name: str) -> Path:
+    """Write `data` into `folder` as `name`, or `name (1)`, `name (2)` ... if taken.
+
+    Created exclusively, so a file already there (the source resume, an earlier
+    download) is never replaced, and a symlink at the target is never followed.
+    """
+    folder.mkdir(parents=True, exist_ok=True)
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for number in range(1000):
+        target = folder / (name if number == 0 else f"{stem} ({number}){suffix}")
+        try:
+            handle = open(target, "xb")
+        except FileExistsError:  # only the open means "taken"; a later failure must not skip ahead
+            continue
+        try:
+            with handle:  # the buffered bytes reach the disk at close, so close is inside the cleanup
+                handle.write(data)
+        except BaseException:
+            target.unlink(missing_ok=True)  # never leave half a resume behind
+            raise
+        return target
+    raise OSError(f"Too many files named like {name} in {folder}.")

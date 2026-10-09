@@ -27,14 +27,14 @@ def test_metric_rephrasing_keeps_the_same_quantity(before, after):
     "Portfolio: www.example.invalid/sample-placeholder",
 ])
 @pytest.mark.parametrize("change", ["replace", "delete"])
-def test_separate_contact_links_are_restored_without_losing_a_new_headline(link, change):
-    base = PIPE_RESUME.replace("pipe-format@example.invalid\n", f"pipe-format@example.invalid\n{link}\n")
+def test_separate_contact_links_are_restored_without_losing_a_narrowed_headline(link, change):
+    base = PIPE_RESUME.replace("pipe-format@example.invalid\n", f"pipe-format@example.invalid\n{link}\nPlatform Engineer | API Security\n")
     replacement = link.replace("sample-placeholder", "another-person") if change == "replace" else ""
-    altered = base.replace(link, replacement + "\nPlatform Engineer | API Security")
+    altered = base.replace(link, replacement).replace("Platform Engineer | API Security", "Platform Engineer")
     fixed, report = apply_guardrails(base, altered)
     assert report.ok and report.restored_contact
     assert link in fixed and "another-person" not in fixed
-    assert "Platform Engineer | API Security" in fixed
+    assert "Platform Engineer" in fixed and "API Security" not in fixed
 
 
 def test_unmarked_job_has_the_same_protected_facts_as_the_writer_sees():
@@ -103,16 +103,18 @@ def test_ordinary_role_words_read_as_names_only_undo_that_line(phrase):
 HEADED = "# Jane Sample\nSr. AI Data Engineer\nDallas, TX\njane@example.invalid | +1 555 010 0000\n\n## Summary\n- Builds data pipelines.\n"
 
 
-@pytest.mark.parametrize("change,restored", [
-    (("Sr. AI Data Engineer", "Senior / Lead AWS Data Engineer"), False),
-    (("Dallas, TX", "Newark, NJ"), True),
-    (("jane@", "janet@"), True),
-    (("# Jane Sample", "# Janet Sample"), True),
-    (("Sr. AI Data Engineer\n", ""), True),
+@pytest.mark.parametrize("change,restored,headline_kept", [
+    (("Sr. AI Data Engineer", "Data Engineer"), False, True),
+    (("Sr. AI Data Engineer", "Senior / Lead AWS Data Engineer"), False, False),
+    (("Dallas, TX", "Newark, NJ"), True, False),
+    (("jane@", "janet@"), True, False),
+    (("# Jane Sample", "# Janet Sample"), True, False),
+    (("Sr. AI Data Engineer\n", ""), True, False),
 ])
-def test_headline_above_the_contact_line_may_be_retargeted_but_identity_may_not(change, restored):
+def test_headline_above_the_contact_line_may_be_narrowed_but_not_retargeted_and_identity_may_not_change(
+        change, restored, headline_kept):
     altered = HEADED.replace(*change)
     fixed, report = apply_guardrails(HEADED, altered)
     assert report.ok and report.restored_contact == restored
-    expected = HEADED.replace(*change) if change[0] == "Sr. AI Data Engineer" else HEADED
+    expected = altered if headline_kept else HEADED
     assert fixed.split("## ")[0].split() == expected.split("## ")[0].split()
