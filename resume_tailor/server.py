@@ -6,6 +6,7 @@ import base64
 import json
 import hashlib
 import io
+import os
 import re
 import threading
 import zipfile
@@ -15,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
-from resume_tailor.files import new_run_dir, write_text
+from resume_tailor.files import new_run_dir, save_copy, write_text
 from resume_tailor.pipeline import run_tailoring, validate_job_description
 from resume_tailor.llm import DEFAULT_BASE_URL, DEFAULT_MODEL, complete, load_dotenv
 
@@ -303,7 +304,6 @@ def _execute_run(
     two_pass: bool = False,
 ) -> dict:
     load_dotenv(ROOT / ".env")
-    import os
 
     api_key = os.environ.get("LLM_API_KEY", "").strip()
     if not api_key:
@@ -318,7 +318,32 @@ def _execute_run(
     )
     if result["ok"]:
         result["download"] = f"/api/download/{out_dir.name}"
+        _save_copy(result, out_dir)
     return result
+
+
+def _save_copy(result: dict, run_dir: Path) -> None:
+    """Also write the verified Word file into RESUME_SAVE_DIR, when that is set.
+
+    A browser download goes through the browser's own save dialog, which a script (or
+    an AI driving the page) cannot answer; this copy needs no browser. The folder comes
+    only from the server's environment, never from a request. A failure is a warning:
+    the run's verified download is unaffected and the page falls back to it.
+    """
+    configured = os.environ.get("RESUME_SAVE_DIR", "").strip()
+    if not configured:
+        return
+    try:
+        # load_dotenv expands nothing, so `$HOME/Downloads` arrives literally; an unset variable
+        # would otherwise become a folder inside the repo, which git does not ignore.
+        expanded = os.path.expandvars(configured)
+        if "$" in expanded:
+            raise ValueError("it uses a variable that is not set")
+        folder = ROOT / Path(expanded).expanduser()  # RuntimeError: "~user" that does not exist
+        manifest, data = _read_result(run_dir.name)  # rechecks the SHA-256 first
+        result["saved_to"] = str(save_copy(data, folder, manifest["file"]))
+    except (OSError, ValueError, RuntimeError) as exc:
+        result.setdefault("warnings", []).append(f"Could not save a copy to {configured}: {exc}")
 
 
 def _write_progress(run_dir: Path, message: str) -> None:

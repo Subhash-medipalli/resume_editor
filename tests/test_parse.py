@@ -64,3 +64,9 @@ def test_system_prompt_spreads_platforms_across_the_timeline():
     text = SYSTEM_PROMPT.lower()
     assert "most recent role" in text and "comparable alternative" in text
     assert "ended before that tool was released" in text
+
+
+def test_system_prompt_only_lets_the_headline_be_narrowed():
+    text = " ".join(SYSTEM_PROMPT.lower().split())
+    assert "rewrite the headline" not in text and "headline may change" not in text
+    assert "do not retarget the headline" in text and "only words it already contains" in text

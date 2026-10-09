@@ -424,22 +424,156 @@ def test_lowercase_text_after_project_is_not_a_named_project():
     assert report.ok, report.violations
 
 
-def test_adding_a_headline_does_not_restore_the_old_header():
-    tailored = PIPE_RESUME.replace("pipe-format@example.invalid\n", "pipe-format@example.invalid\nPlatform Engineer | API Security\n")
-    fixed, report = apply_guardrails(PIPE_RESUME, tailored)
+CONTACT = "jane@example.invalid | +1 555 010 0000"
+HEADLINE = "Sr. AI/ML Engineer / Data Scientist"
+# The headline above the contact line, below it, and in bold.
+LAYOUTS = [pytest.param("{h}\n" + CONTACT, id="above"), pytest.param(CONTACT + "\n{h}", id="below"),
+           pytest.param("**{h}**\n" + CONTACT, id="bold-above"), pytest.param(CONTACT + "\n**{h}**", id="bold-below")]
+
+
+def jane(header):
+    return f"# Jane Doe\n{header}\n\n## Summary\n- Builds pipelines.\n"
+
+
+def test_a_headline_the_original_lacks_is_removed_without_flagging_the_contact():
+    base = jane(CONTACT)
+    fixed, report = apply_guardrails(base, jane(CONTACT + "\nPlatform Engineer | API Security"))
     assert report.ok, report.violations
-    assert fixed == tailored
+    assert fixed == base
     assert not report.restored_contact
+    assert report.warnings == ["Removed a headline the edit added; your resume has none."]
 
 
-def test_contact_repair_preserves_a_new_headline():
-    tailored = PIPE_RESUME.replace("pipe-format@example.invalid\n", "changed@example.invalid\nPlatform Engineer | API Security\n")
-    fixed, report = apply_guardrails(PIPE_RESUME, tailored)
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_a_resume_without_a_headline_does_not_gain_one(layout):
+    base = jane(CONTACT)
+    fixed, report = apply_guardrails(base, jane(layout.format(h="Sr. AI/ML Engineer")))
+    assert report.ok and fixed == base
+    assert report.warnings[-1] == "Removed a headline the edit added; your resume has none."
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("retargeted", [
+    "AI/ML Engineer / Data Scientist – AI Strategic Plan & Prototype Development",
+    "Sr. Agentic AI & Infrastructure Automation Engineer",
+    "Sr. AI/ML Engineer / Data Scientist – GenAI",
+    "Senior AI/ML Engineer / Data Scientist",
+])
+def test_a_headline_retargeted_to_the_job_gets_the_original_back(layout, retargeted):
+    base = jane(layout.format(h=HEADLINE))
+    fixed, report = apply_guardrails(base, jane(layout.format(h=retargeted)))
     assert report.ok, report.violations
-    assert report.restored_contact
-    assert "pipe-format@example.invalid" in fixed
-    assert "changed@example.invalid" not in fixed
-    assert "Platform Engineer | API Security" in fixed
+    assert fixed == base and not report.restored_contact
+    assert report.warnings == [f"Kept your original headline: “{HEADLINE}”"]
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("narrowed", [
+    "ML Engineer", "AI Engineer", "Data Scientist", "Sr. ML Engineer", "Data Scientist / AI/ML Engineer",
+    "AI and ML Engineer", "SR. AI/ML ENGINEER",
+])
+def test_a_narrowed_or_reordered_headline_is_kept(layout, narrowed):
+    base = jane(layout.format(h=HEADLINE))
+    tailored = jane(layout.format(h=narrowed))
+    fixed, report = apply_guardrails(base, tailored)
+    assert report.ok, report.violations
+    assert fixed == tailored and not report.warnings and not report.restored_contact
+
+
+def test_a_headline_that_loses_its_bold_is_not_an_edit():
+    base = jane(CONTACT + f"\n**{HEADLINE}**")
+    tailored = jane(CONTACT + "\nML Engineer")
+    fixed, report = apply_guardrails(base, tailored)
+    assert report.ok and fixed == tailored and not report.warnings
+
+
+def test_one_new_word_on_any_header_line_restores_every_header_line():
+    base = jane(f"Sr. AI/ML Engineer\n{CONTACT}\nData Scientist")
+    narrowed = base.replace("Sr. AI/ML Engineer", "ML Engineer")
+    fixed, report = apply_guardrails(base, narrowed)
+    assert fixed == narrowed and not report.warnings
+    fixed, report = apply_guardrails(base, narrowed.replace("Data Scientist", "GenAI Data Scientist"))
+    assert report.ok and fixed == base and len(report.warnings) == 1
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_contact_tampering_and_a_retargeted_headline_both_come_back(layout):
+    base = jane(layout.format(h=HEADLINE))
+    tailored = jane(layout.format(h="Sr. Agentic AI Engineer").replace("jane@", "changed@"))
+    fixed, report = apply_guardrails(base, tailored)
+    assert report.ok, report.violations
+    assert fixed == base and report.restored_contact
+    assert report.warnings[0].startswith("Name or contact details were altered")
+    assert report.warnings[1:] == [f"Kept your original headline: “{HEADLINE}”"]
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_contact_repair_preserves_a_narrowed_headline(layout):
+    base = jane(layout.format(h=HEADLINE))
+    fixed, report = apply_guardrails(base, jane(layout.format(h="ML Engineer").replace("jane@", "changed@")))
+    assert report.ok, report.violations
+    assert report.restored_contact and report.warnings == [
+        "Name or contact details were altered by the model; restored from the base resume."]
+    assert "jane@example.invalid" in fixed and "changed@" not in fixed
+    assert fixed == jane(layout.format(h="ML Engineer"))
+
+
+def test_a_headline_is_guarded_in_a_document_with_no_section_headings():
+    base = f"# Jane Doe\n{HEADLINE}\n{CONTACT}\n- Builds pipelines.\n"
+    tailored = base.replace(HEADLINE, "Sr. Agentic AI Engineer").replace("Builds pipelines", "Builds ML pipelines")
+    fixed, report = apply_guardrails(base, tailored)
+    assert report.ok, report.violations
+    assert fixed == base.replace("Builds pipelines", "Builds ML pipelines")
+    assert len(report.warnings) == 1 and "original headline" in report.warnings[0]
+
+
+# Header text that is not a job title: a summary paragraph, a skills strip or an
+# unrecognised label with bullets (Word styles that parse as a tagline or bullet above
+# the first heading). Tailoring it is the whole point, so it is never held to the headline rule.
+SUMMARY = "Data engineer with eight years building pipelines on AWS and Spark."
+HEADER_TEXT = [
+    pytest.param(f"**{SUMMARY}**", f"**{SUMMARY[:-1]} and Kafka streaming.**", id="unlabeled-summary"),
+    pytest.param(f"**Summary**\n{SUMMARY}", f"**Summary**\n{SUMMARY[:-1]} and Kafka streaming.", id="summary-label"),
+    pytest.param("**Python | SQL | AWS**", "**Python | SQL | AWS | Kafka | Snowflake**", id="skills-strip"),
+    pytest.param("**Technical Skills**\n- Languages: Python, SQL\n- Cloud: AWS",
+                 "**Technical Skills**\n- Languages: Python, SQL, Scala\n- Cloud: AWS, Snowflake", id="skills-label"),
+]
+
+
+@pytest.mark.parametrize("before,after", HEADER_TEXT)
+def test_header_text_that_is_not_a_job_title_is_tailored_as_usual(before, after):
+    tailored = jane(CONTACT + "\n" + after)
+    fixed, report = apply_guardrails(jane(CONTACT + "\n" + before), tailored)
+    assert report.ok, report.violations
+    assert fixed == tailored and not report.warnings
+
+
+@pytest.mark.parametrize("before,after", HEADER_TEXT)
+def test_a_retargeted_headline_is_reverted_without_undoing_the_text_beside_it(before, after):
+    base = jane(f"{CONTACT}\n**{HEADLINE}**\n{before}")
+    tailored = jane(f"{CONTACT}\n**Sr. Agentic AI Engineer**\n{after}")
+    fixed, report = apply_guardrails(base, tailored)
+    assert report.ok, report.violations
+    assert fixed == jane(f"{CONTACT}\n**{HEADLINE}**\n{after}")
+    assert report.warnings == [f"Kept your original headline: “{HEADLINE}”"]
+
+
+@pytest.mark.parametrize("contact,headline,retargeted", [
+    ("jane@example.invalid | linkedin.com/in/jane-doe-data-engineer", "Sr. Software Developer", "Data Engineer"),
+    ("jane.python@example.invalid | +1 555 010 0000", "Sr. Developer", "Sr. Python Developer"),
+])
+def test_words_in_the_contact_line_do_not_license_a_retargeted_headline(contact, headline, retargeted):
+    base = jane(f"{headline}\n{contact}")
+    fixed, report = apply_guardrails(base, jane(f"{retargeted}\n{contact}"))
+    assert report.ok and fixed == base
+    assert report.warnings == [f"Kept your original headline: “{headline}”"]
+
+
+def test_every_original_headline_line_comes_back_when_the_model_drops_one():
+    base = jane(f"Sr. AI/ML Engineer\n{CONTACT}\nData Scientist")
+    fixed, report = apply_guardrails(base, jane(f"GenAI Engineer\n{CONTACT}"))
+    assert report.ok and "GenAI" not in fixed
+    assert "Sr. AI/ML Engineer" in fixed and "Data Scientist" in fixed and CONTACT in fixed
 
 
 def test_rewriting_cannot_leave_a_summary_heading_with_no_content():

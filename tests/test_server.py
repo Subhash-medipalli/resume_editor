@@ -102,6 +102,22 @@ def test_downloads_are_immediate_and_stay_bound_to_their_run(api, monkeypatch):
     assert api("GET", first_url) == (200, first_bytes)
 
 
+def test_download_is_an_attachment_for_a_same_origin_browser_request(api):
+    _, result = api("POST", "/api/tailor", {"jd": "Python"})
+    conn = HTTPConnection("127.0.0.1", api.port, timeout=10)
+    try:
+        # What a browser sends for a script-clicked <a download> on this page.
+        conn.request("GET", result["download"], headers={"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "navigate"})
+        res = conn.getresponse()
+        res.read()
+    finally:
+        conn.close()
+    assert res.status == 200
+    assert res.getheader("Content-Disposition").startswith("attachment;")
+    assert res.getheader("Content-Type").endswith("wordprocessingml.document")
+    assert res.getheader("Cache-Control") == "no-store"
+
+
 def test_busy_request_is_explicit_and_same_name_uploads_remain_separate(api, monkeypatch):
     started, release = threading.Event(), threading.Event()
     def held_reply(messages, **kwargs):
@@ -486,3 +502,87 @@ def test_a_blocked_progress_write_never_fails_the_run(api, monkeypatch):
     monkeypatch.setattr(server, "write_text", blocked)
     status, result = api("POST", "/api/tailor", {"jd": "Python"})
     assert status == 200 and result["ok"] and result["download"]
+
+
+def test_a_finished_resume_is_also_saved_to_the_configured_folder(api, monkeypatch, tmp_path):
+    # No browser, so no save dialog: this is how a script or an AI driving the page gets the file.
+    monkeypatch.setenv("RESUME_SAVE_DIR", str(tmp_path / "saved"))
+    _, result = api("POST", "/api/tailor", {"jd": "Python"})
+    assert result["ok"] and result["saved_to"].startswith(str(tmp_path / "saved"))
+    assert (tmp_path / "saved").is_dir()
+    saved = server.Path(result["saved_to"])
+    assert saved.read_bytes() == api("GET", result["download"])[1]  # the verified bytes
+    assert saved.name == server._read_result(result["download"].rsplit("/", 1)[1])[0]["file"]  # the resume's own name
+    _, again = api("POST", "/api/tailor", {"jd": "Python again"})
+    assert again["saved_to"] != result["saved_to"] and saved.is_file()  # never replaced
+
+
+def test_the_save_folder_comes_from_the_environment_only(api, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("RESUME_SAVE_DIR", "~/Downloads")
+    _, home = api("POST", "/api/tailor", {"jd": "Python"})
+    assert home["saved_to"].startswith(str(tmp_path / "home" / "Downloads"))
+    monkeypatch.setenv("RESUME_SAVE_DIR", "relative-folder")
+    _, relative = api("POST", "/api/tailor", {"jd": "Python"})
+    assert relative["saved_to"].startswith(str(tmp_path / "relative-folder"))
+    # A request cannot choose the folder.
+    elsewhere = tmp_path / "elsewhere"
+    monkeypatch.delenv("RESUME_SAVE_DIR")
+    _, plain = api("POST", "/api/tailor", with_resume({"jd": "Python", "save_dir": str(elsewhere)}))
+    assert not elsewhere.exists() and "saved_to" not in plain
+
+
+def test_without_a_save_folder_nothing_is_written_outside_the_run(api):
+    _, result = api("POST", "/api/tailor", {"jd": "Python"})
+    assert result["ok"] and "saved_to" not in result
+
+
+def test_a_failed_save_is_a_warning_and_the_verified_download_still_works(api, monkeypatch, tmp_path):
+    blocker = tmp_path / "not-a-folder"
+    blocker.write_text("a file where the folder should be")
+    monkeypatch.setenv("RESUME_SAVE_DIR", str(blocker))
+    _, result = api("POST", "/api/tailor", {"jd": "Python"})
+    assert result["ok"] and "saved_to" not in result
+    assert any("Could not save a copy" in w for w in result["warnings"])
+    assert api("GET", result["download"])[0] == 200
+
+
+def test_a_failed_save_adds_to_the_runs_warnings_instead_of_replacing_them(api, monkeypatch, tmp_path):
+    _, result = api("POST", "/api/tailor", {"jd": "Python"})
+    blocker = tmp_path / "not-a-folder"
+    blocker.write_text("a file where the folder should be")
+    monkeypatch.setenv("RESUME_SAVE_DIR", str(blocker))
+    seeded = {"ok": True, "warnings": ["restored a dropped bullet"]}  # what a repaired run carries
+    server._save_copy(seeded, server.ROOT / "out" / "runs" / result["download"].rsplit("/", 1)[1])
+    assert seeded["warnings"][0] == "restored a dropped bullet" and len(seeded["warnings"]) == 2
+
+
+def test_variables_in_the_save_folder_are_expanded_and_an_unset_one_is_refused(api, monkeypatch, tmp_path):
+    # .env values reach the server unexpanded; an unset variable must not become a folder in the repo.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "home"))
+    monkeypatch.setenv("RESUME_SAVE_DIR", "$HOME/Downloads")
+    _, home = api("POST", "/api/tailor", {"jd": "Python"})
+    assert home["saved_to"].startswith(str(tmp_path / "home" / "Downloads"))
+    monkeypatch.delenv("NO_SUCH_VAR_FOR_RESUME_TAILOR", raising=False)
+    monkeypatch.setenv("RESUME_SAVE_DIR", "$NO_SUCH_VAR_FOR_RESUME_TAILOR/Downloads")
+    _, unset = api("POST", "/api/tailor", {"jd": "Python"})
+    assert unset["ok"] and unset["download"] and "saved_to" not in unset
+    assert any("Could not save a copy" in w for w in unset["warnings"])
+    assert not any("NO_SUCH_VAR" in p.name for p in tmp_path.iterdir())
+
+
+def test_an_unresolvable_save_folder_never_fails_a_good_run(api, monkeypatch):
+    monkeypatch.setenv("RESUME_SAVE_DIR", "~no-such-user-for-resume-tailor/Downloads")
+    _, result = api("POST", "/api/tailor", {"jd": "Python"})
+    assert result["ok"] and result["download"] and "saved_to" not in result
+    assert any("Could not save a copy" in w for w in result["warnings"])
+
+
+def test_a_failed_run_saves_nothing(api, monkeypatch, tmp_path):
+    monkeypatch.setenv("RESUME_SAVE_DIR", str(tmp_path / "saved"))
+    monkeypatch.setattr(server, "complete", lambda *a, **k: (_ for _ in ()).throw(LLMError("provider failed")))
+    _, failed = api("POST", "/api/tailor", {"jd": "Python"})
+    assert not failed["ok"] and "saved_to" not in failed
+    assert not (tmp_path / "saved").exists()

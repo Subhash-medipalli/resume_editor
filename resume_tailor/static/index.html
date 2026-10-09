@@ -57,6 +57,7 @@
     .fit { font-size:20px; font-weight:700; margin:0 0 4px; }
     .why { color:var(--muted); font-size:15px; margin:0; }
     .cta { display:flex; gap:12px; flex-wrap:wrap; margin-top:20px; }
+    .dlnote { margin:12px 0 0; }
     .banner { border-radius:12px; padding:16px 18px; }
     .banner.red { background:#fff1f2; border:1px solid #f5c2c7; } .banner.amber { background:#fff8e6; border:1px solid #f0d58c; }
     .banner h3 { margin:0 0 8px; font-size:16px; }
@@ -135,6 +136,7 @@
         <button class="btn primary big" id="retry" type="button" hidden>Run again</button>
         <button class="btn ghost" id="again" type="button">Tailor for another job</button>
       </div>
+      <p class="help dlnote" id="dlnote" role="status" hidden>Your download should start automatically. If it doesn't, use the button.</p>
     </div>
     <div class="card banner red" id="blocked" hidden>
       <h3>No download — the result failed checks</h3>
@@ -155,6 +157,7 @@
   const $ = (id) => document.getElementById(id);
   const show = (id) => { for (const s of ["enter","working","result"]) $(s).hidden = s !== id; window.scrollTo({top:0, behavior:"smooth"}); };
   let attached = null, tick = null, running = false, readingFile = false, selectedId = null, libraryItems = [];
+  const DOWNLOAD_RE = /^\/api\/download\/[0-9a-f]{32}$/;
 
   function loadHistory() {
     Promise.all([
@@ -213,7 +216,7 @@
       const when = (run.created_at || "").replace("T", " ").replace("+00:00", " UTC");
       label.textContent = [when, run.source_name, run.jd_preview].filter(Boolean).join(" · ");
       li.appendChild(label);
-      if (run.download && /^\/api\/download\/[0-9a-f]{32}$/.test(run.download)) {
+      if (run.download && DOWNLOAD_RE.test(run.download)) {
         const link = document.createElement("a");
         link.href = run.download;
         link.textContent = "Download";
@@ -315,7 +318,7 @@
     if (jd.length > 60000) { $("err").textContent = "Job description is too long (maximum 60,000 characters)."; $("err").hidden = false; return; }
     if (!attached && !selectedId) { $("err").textContent = "Upload a .docx base resume, or choose a saved one."; $("err").hidden = false; return; }
     running = true; updateControls();
-    $("dl").hidden = true; $("dl").removeAttribute("href");
+    $("dl").hidden = true; $("dl").removeAttribute("href"); $("dlnote").hidden = true;
     $("err").hidden = true; $("timer").textContent = "0:00"; show("working");
     $("progress").textContent = "Preparing the source resume…";
     const t0 = Date.now(); clearInterval(tick);
@@ -360,6 +363,13 @@
     $("fit").textContent = data.ok ? (sc == null ? "Match estimate unavailable" : "Model estimate: " + (sc >= 75 ? "good fit" : sc >= 50 ? "partial fit" : "poor fit")) + ` · ${data.changed_lines || 0} line${data.changed_lines === 1 ? "" : "s"} changed` + (cov == null ? "" : ` · ${cov}% of JD keywords`) : "No downloadable result";
     $("why").textContent = [data.match_line, data.score_note].filter((v,i,a) => v && a.indexOf(v) === i).join(" ");
     $("dl").hidden = !data.download; if (data.download) $("dl").href = data.download;
+    const auto = data.ok && DOWNLOAD_RE.test(data.download);
+    // When the server saved its own copy (RESUME_SAVE_DIR) no browser download is needed, and none
+    // means no save dialog for a script or AI driving this page to get stuck on.
+    const saved = auto && typeof data.saved_to === "string" && data.saved_to;
+    $("dlnote").textContent = saved ? "Saved to " + data.saved_to + ". The button downloads another copy through your browser."
+      : "Your download should start automatically. If it doesn't, use the button.";
+    $("dlnote").hidden = !auto;
     $("retry").hidden = !!data.ok;
     $("blocked").hidden = !list("violations", data.violations);
     $("warn").hidden = !list("warnings", data.warnings);
@@ -367,6 +377,8 @@
     if (!list("changes", data.changes)) $("changes").innerHTML = '<li class="empty">Nothing listed.</li>';
     if (data.review_items && data.review_items.length) paintEvidence(data.review_items); else paintDiff(data.diff);
     show("result");
+    // A temporary download link, never a navigation: a refused or failed download must not replace this view.
+    if (auto && !saved) { const a = document.createElement("a"); a.href = data.download; a.download = ""; document.body.appendChild(a); a.click(); a.remove(); }
   }
 </script>
 </body>

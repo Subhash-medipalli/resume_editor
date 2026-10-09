@@ -90,6 +90,14 @@ def apply_guardrails(base: str, tailored: str) -> tuple[str, GuardrailReport]:
             "Name or contact details were altered by the model; restored from the base resume."
         )
 
+    out, retargeted = _restore_headline(base_n, out)
+    if retargeted:
+        original = _headline_text(_contact_block(base_n))
+        report.warnings.append(
+            f"Kept your original headline: “{original}”" if original
+            else "Removed a headline the edit added; your resume has none."
+        )
+
     out, kept = restore_frozen(base_n, out)
     report.warnings.extend(kept)
 
@@ -1140,7 +1148,7 @@ def _last_identity_line(lines: list[str]) -> int:
     """Index of the last header line carrying a contact detail.
 
     Everything up to it is identity (name, email, phone, links); anything after it is
-    usually a headline/tagline, which the model is allowed to retarget.
+    usually a headline/tagline, which the model may reword (see ``_restore_headline``).
     """
     last = -1
     for index, line in enumerate(lines):
@@ -1150,7 +1158,7 @@ def _last_identity_line(lines: list[str]) -> int:
 
 
 # A job-title headline between the name and the contact line ("Sr. Data Engineer")
-# may be retargeted like one below it; a location line there may not.
+# may be reworded like one below it; a location line there may not.
 _HEADLINE_RE = re.compile(
     r"\b(?:engineer|developer|architect|analyst|scientist|consultant|manager|administrator|"
     r"specialist|designer|programmer|tester|lead|director)s?\b", re.I)
@@ -1209,7 +1217,7 @@ def _restore_contact(base: str, out: str) -> tuple[str, bool]:
     # changes header length; that must not restore the entire old header.
     if boundary >= 0 and out_boundary >= 0:
         (original, base_kept), (current, out_kept) = _identity(base_lines), _identity(out_lines)
-        # Below the contact line the model may retarget taglines, but not add a location
+        # Below the contact line the model may reword taglines, but not add a location
         # or work authorization.
         base_tail = [line for line in base_lines[boundary + 1:] if line.strip()]
         out_tail = [line for line in out_lines[out_boundary + 1:] if line.strip()]
@@ -1238,6 +1246,56 @@ def _restore_contact(base: str, out: str) -> tuple[str, bool]:
 
     # If the contact block was dropped entirely, restore it without touching body.
     return base_header + out[len(out_header) :], True
+
+
+def _words(text: str) -> set[str]:
+    """Lowercase alphanumeric words, ignoring emphasis, punctuation and connectors."""
+    return set(re.findall(r"[^\W_]+", text.lower())) - {"and", "of", "for", "the"}
+
+
+def _is_headline(line: str) -> bool:
+    """A header line that reads as a job title.
+
+    Not the name, contact details, a location or work authorization, and not a bullet,
+    a sentence, or a line without a job-title word (a summary, a skills label or strip):
+    those sit above the first section heading in some layouts and are tailored as usual.
+    """
+    text = line.replace("**", "").strip()
+    return bool(_HEADLINE_RE.search(text) and len(text.split()) <= 20 and not text.startswith(("#", "-"))
+                and not text.endswith(".") and not CONTACT_MARKER_RE.search(text) and not _PERSONAL_RE.search(text))
+
+
+def _headline_text(header: str) -> str:
+    return " | ".join(line.replace("**", "").strip() for line in header.splitlines() if _is_headline(line))
+
+
+def _restore_headline(base: str, out: str) -> tuple[str, bool]:
+    """Bring the original headline lines back if the headline was retargeted to the job.
+
+    The headline may be narrowed or reordered with words the original headline already
+    has ("Sr. AI/ML Engineer / Data Scientist" -> "ML Engineer"). A new word, whether
+    a specialty, a seniority or a phrase from the job description, is a different
+    title, not a rewording. Only headline lines are compared and replaced, so words in
+    the name or contact lines license nothing and a rewritten summary or skills line
+    in the same header stays.
+    """
+    base_header = _contact_block(base)
+    out_header = _contact_block(out)
+    if _words(_headline_text(out_header)) <= _words(_headline_text(base_header)):
+        return out, False
+    spare = iter([line for line in base_header.splitlines() if _is_headline(line)])
+    lines: list[str] = []
+    last = -1
+    for line in out_header.rstrip("\n").splitlines():
+        if _is_headline(line):
+            line = next(spare, None)  # the original's lines, in order; surplus headline lines go
+            if line is None:
+                continue
+            last = len(lines)
+        lines.append(line)
+    lines[last + 1 : last + 1] = spare  # any the model dropped, after the last one it kept
+    trailing = out_header[len(out_header.rstrip("\n")) :]
+    return "\n".join(lines) + trailing + out[len(out_header) :], True
 
 
 def _split_job_heading(heading: str) -> tuple[str, str | None]:

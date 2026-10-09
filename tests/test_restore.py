@@ -346,15 +346,26 @@ def test_a_single_renamed_section_heading_is_restored():
     assert report.ok and fixed == base
 
 
-@pytest.mark.parametrize("base_header,draft_header", [
-    ("Senior Data Engineer\njane@example.invalid | +1 555 010 0000", "jane@example.invalid | +1 555 010 0000\nSenior AWS Data Engineer"),
-    ("jane@example.invalid | +1 555 010 0000\nSenior Data Engineer", "Senior AWS Data Engineer\njane@example.invalid | +1 555 010 0000"),
-])
-def test_a_headline_moved_across_the_contact_line_is_kept_once(base_header, draft_header):
+HEADLINE_MOVES = [
+    ("Senior AWS Data Engineer\njane@example.invalid | +1 555 010 0000", "jane@example.invalid | +1 555 010 0000\n{}"),
+    ("jane@example.invalid | +1 555 010 0000\nSenior AWS Data Engineer", "{}\njane@example.invalid | +1 555 010 0000"),
+]
+
+
+@pytest.mark.parametrize("base_header,draft_header", HEADLINE_MOVES)
+def test_a_narrowed_headline_moved_across_the_contact_line_is_kept_once(base_header, draft_header):
     base = f"# Jane Sample\n{base_header}\n\n## Summary\n- Builds pipelines.\n"
-    fixed, report = apply_guardrails(base, base.replace(base_header, draft_header))
+    fixed, report = apply_guardrails(base, base.replace(base_header, draft_header.format("Senior Data Engineer")))
     header = fixed.split("## ")[0]
-    assert report.ok and header.count("Data Engineer") == 1 and "Senior AWS Data Engineer" in header
+    assert report.ok and header.count("Data Engineer") == 1 and "Senior Data Engineer" in header and "AWS" not in header
+
+
+@pytest.mark.parametrize("base_header,draft_header", HEADLINE_MOVES)
+def test_a_retargeted_headline_moved_across_the_contact_line_is_reverted_once(base_header, draft_header):
+    base = f"# Jane Sample\n{base_header}\n\n## Summary\n- Builds pipelines.\n"
+    fixed, report = apply_guardrails(base, base.replace(base_header, draft_header.format("Senior Azure Data Engineer")))
+    assert report.ok and fixed == base and "Azure" not in fixed
+    assert any("original headline" in warning for warning in report.warnings)
 
 
 @pytest.mark.parametrize("added", ["Newark, NJ (Hybrid) | Open to C2C", "Work Authorization: US Citizen"])
@@ -463,11 +474,18 @@ def test_no_header_line_may_add_a_location_or_work_authorization(above, below, d
     assert (above or below).strip() in header if (above or below) else "Engineer" not in header
 
 
-def test_a_retargeted_tagline_with_ai_or_ml_is_not_a_location():
+def test_a_narrowed_tagline_with_ai_or_ml_is_not_a_location():
     base = HEADER.format(above="", below="**Sr. AI/ML Engineer / Data Scientist**\n")
-    draft = HEADER.format(above="", below="Senior AI/ML Engineer | Agentic AI, GenAI, ML\n")
+    draft = HEADER.format(above="", below="AI/ML Engineer | Data Scientist\n")
     fixed, report = apply_guardrails(base, draft)
-    assert report.ok and "Agentic AI, GenAI, ML" in fixed
+    assert report.ok and fixed == draft and not report.warnings
+
+
+def test_a_tagline_retargeted_to_the_job_gets_the_original_back():
+    base = HEADER.format(above="", below="**Sr. AI/ML Engineer / Data Scientist**\n")
+    fixed, report = apply_guardrails(base, HEADER.format(above="", below="Senior AI/ML Engineer | Agentic AI, GenAI, ML\n"))
+    assert report.ok and fixed == base
+    assert report.warnings == ["Kept your original headline: “Sr. AI/ML Engineer / Data Scientist”"]
 
 
 def test_a_sibling_merge_that_keeps_the_tool_names_is_not_repeated():

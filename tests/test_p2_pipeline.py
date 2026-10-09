@@ -312,3 +312,50 @@ def test_polish_can_retain_keywords_with_different_case_and_add_more(tmp_path):
     assert result["ok"] and result["polish_error"] is None
     assert Path(result["resume_path"]).read_text() == polished
     assert result["coverage"]["score"] == 100
+
+
+HEADLINE = "Sr. AI/ML Engineer / Data Scientist"
+HEADLINED = SAMPLE_RESUME.replace("\n\n## Summary", f"\n{HEADLINE}\n\n## Summary", 1)
+
+
+def test_a_headline_retargeted_by_the_model_is_not_published(tmp_path):
+    source = tmp_path / "base.md"
+    source.write_text(HEADLINED)
+    tailored = lightly_tailored(HEADLINED).replace(HEADLINE, "Sr. Agentic AI & Infrastructure Automation Engineer")
+    raw = pack_model_output(changelog=["Retargeted the headline"], match="SCORE: 90\ngood: aligned", resume=tailored)
+    result = run_tailoring(job_description="Python", resume_path=source, out_dir=tmp_path / "run",
+                           api_key="fake", base_url="https://example.invalid", model="test",
+                           complete_fn=lambda *a, **k: raw)
+    assert result["ok"], result
+    assert Path(result["resume_path"]).read_text() == lightly_tailored(HEADLINED)
+    assert any("Kept your original headline" in warning for warning in result["warnings"])
+    assert result["match_score"] is None
+
+
+def test_a_polish_that_retargets_the_headline_keeps_the_first_pass(tmp_path):
+    source = tmp_path / "base.md"
+    source.write_text(HEADLINED)
+    first = lightly_tailored(HEADLINED)
+    replies = iter([pack_model_output(changelog=["First changes"], match="good: first", resume=first),
+                    pack_model_output(changelog=["Polished"], match="good: polish",
+                                      resume=first.replace(HEADLINE, "Sr. Agentic AI Engineer"))])
+    result = run_tailoring(job_description="Python", resume_path=source, out_dir=tmp_path / "run",
+                           api_key="fake", base_url="https://example.invalid", model="test",
+                           complete_fn=lambda *a, **k: next(replies), two_pass=True)
+    assert result["ok"], result
+    assert result["polish_error"] == "The polish required automated corrections."
+    assert Path(result["resume_path"]).read_text() == first
+
+
+def test_a_skills_strip_above_the_first_heading_is_tailored_not_frozen_as_a_headline(tmp_path):
+    base = SAMPLE_RESUME.replace("\n\n## Summary", "\n**Python | SQL | AWS**\n\n## Summary", 1)
+    source = tmp_path / "base.md"
+    source.write_text(base)
+    tailored = lightly_tailored(base).replace("**Python | SQL | AWS**", "**Python | SQL | AWS | Kafka | Snowflake**")
+    raw = pack_model_output(changelog=["Added JD skills"], match="SCORE: 90\ngood: aligned", resume=tailored)
+    result = run_tailoring(job_description="Python", resume_path=source, out_dir=tmp_path / "run",
+                           api_key="fake", base_url="https://example.invalid", model="test",
+                           complete_fn=lambda *a, **k: raw)
+    assert result["ok"], result
+    assert "Kafka | Snowflake" in Path(result["resume_path"]).read_text()
+    assert not any("headline" in warning for warning in result["warnings"])
