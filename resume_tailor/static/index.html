@@ -367,7 +367,7 @@
     if (!jd) { $("err").textContent = "Paste a job description first."; $("err").hidden = false; return; }
     if (jd.length > 60000) { $("err").textContent = "Job description is too long (maximum 60,000 characters)."; $("err").hidden = false; return; }
     if (!attached && !selectedId) { $("err").textContent = "Upload a .docx base resume, or choose a saved one."; $("err").hidden = false; return; }
-    if (provider && !provider.ready) { $("err").textContent = $("keyWarn").textContent; $("err").hidden = false; return; }
+    if (provider && !provider.ready) { $("err").textContent = "Can't run yet: see the AI model note above."; $("err").hidden = false; return; }
     running = true; updateControls();
     $("dl").hidden = true; $("dl").removeAttribute("href"); $("dlnote").hidden = true;
     $("err").hidden = true; $("timer").textContent = "0:00"; show("working");
