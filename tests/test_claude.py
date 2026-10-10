@@ -71,10 +71,11 @@ def fake(monkeypatch):
     return install
 
 
-def test_request_streams_with_adaptive_thinking_and_the_refusal_fallback(fake):
+def test_request_streams_with_adaptive_thinking_and_the_refusal_fallback(fake, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://proxy.example.invalid")  # must be ignored
     client = fake(message("  the resume  "))
     assert claude.complete(MESSAGES, api_key="sk-test", temperature=0.2) == "the resume"
-    assert client.created == [{"api_key": "sk-test", "max_retries": 0}]
+    assert client.created == [{"api_key": "sk-test", "base_url": "https://api.anthropic.com", "max_retries": 0}]
     request = client.requests[0]
     assert request["model"] == "claude-opus-5-5" and request["max_tokens"] == 32000
     assert request["system"] == "Rules" and request["messages"] == MESSAGES[1:]

@@ -11,6 +11,7 @@ import anthropic
 from resume_tailor.llm import DEFAULT_TIMEOUT, RETRY_STATUS, LLMError, _EmptyReply, _Transient, with_retries
 
 DEFAULT_MODEL = "claude-opus-5-5"
+API_URL = "https://api.anthropic.com"  # Anthropic's own API, never a proxy
 # The page's model menu. Costs are rough estimates for one resume (see README).
 MODELS = {
     "claude-opus-5-5": "Recommended: follows the keep-every-fact rules most reliably. Moderate speed, about 15¢ a resume.",
@@ -55,7 +56,8 @@ def complete(
     if model in FALLBACK_MODELS:
         request.update(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
     # with_retries owns retries and the shared deadline, so the SDK must not retry on its own.
-    client = anthropic.Anthropic(api_key=api_key, max_retries=0)
+    # The address is fixed so an inherited ANTHROPIC_BASE_URL can never send the key elsewhere.
+    client = anthropic.Anthropic(api_key=api_key, base_url=API_URL, max_retries=0)
     return with_retries(lambda wait, remaining: _answer(_stream(client, request, wait, remaining), max_tokens),
                         model=model, timeout=timeout, total_timeout=total_timeout, progress=progress)
 
