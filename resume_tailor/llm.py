@@ -40,6 +40,10 @@ class _EmptyReply(LLMError):
     """HTTP 200 without a usable answer. Providers document these as transient."""
 
 
+class _Transient(LLMError):
+    """A busy or unreachable provider; retried like an HTTP 503."""
+
+
 @dataclass(frozen=True)
 class TailorResult:
     resume_markdown: str
@@ -120,12 +124,6 @@ def complete(
 ) -> str:
     url = base_url.rstrip("/") + "/chat/completions"
     nvidia = _is_nvidia(base_url, model)
-    if timeout == DEFAULT_TIMEOUT:
-        timeout = os.environ.get("LLM_TIMEOUT", DEFAULT_TIMEOUT)
-    timeout = _positive_seconds(timeout)
-    total_timeout = _positive_seconds(os.environ.get("LLM_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT) if total_timeout is None else total_timeout)
-    deadline = time.monotonic() + total_timeout
-    progress = progress or (lambda message: None)
     body: dict = {
         "model": model,
         "messages": list(messages),
@@ -161,6 +159,19 @@ def complete(
         },
         method="POST",
     )
+    return with_retries(lambda wait, remaining: _answer(_request_with_deadline(request, wait, remaining), nvidia),
+                        model=model, timeout=timeout, total_timeout=total_timeout, progress=progress)
+
+
+def with_retries(send, *, model: str, timeout: float = DEFAULT_TIMEOUT, total_timeout: float | None = None,
+                 progress=None) -> str:
+    """Call send(wait, remaining) until it answers, retrying busy providers within one total deadline."""
+    if timeout == DEFAULT_TIMEOUT:
+        timeout = os.environ.get("LLM_TIMEOUT", DEFAULT_TIMEOUT)
+    timeout = _positive_seconds(timeout)
+    total_timeout = _positive_seconds(os.environ.get("LLM_TOTAL_TIMEOUT", DEFAULT_TOTAL_TIMEOUT) if total_timeout is None else total_timeout)
+    deadline = time.monotonic() + total_timeout
+    progress = progress or (lambda message: None)
     last_error: Exception | None = None
     for attempt in range(MAX_ATTEMPTS):
         remaining = deadline - time.monotonic()
@@ -169,8 +180,8 @@ def complete(
                            + (f" Last problem: {last_error}" if last_error else ""))
         progress(f"Waiting for model reply — attempt {attempt + 1} of {MAX_ATTEMPTS}")
         try:
-            return _answer(_request_with_deadline(request, min(timeout, remaining), remaining), nvidia)
-        except _EmptyReply as exc:
+            return send(min(timeout, remaining), remaining)
+        except (_EmptyReply, _Transient) as exc:
             last_error = exc
         except LLMError as exc:
             if last_error is None:

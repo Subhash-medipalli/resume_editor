@@ -13,7 +13,7 @@ uv sync
 cp .env.example .env
 ```
 
-Set the API key, base URL, and model in `.env` (see `.env.example`). Any service that speaks the standard Chat Completions format works (OpenRouter, NVIDIA, and others); set the URL and model together when changing providers. Do not commit `.env`.
+Put your API keys in `.env` (see `.env.example`). Claude is the main service: set `CLAUDE_API_KEY` (from the [Claude Console](https://console.anthropic.com)) and optionally `CLAUDE_MODEL`. The alternative is any service that speaks the standard Chat Completions format (OpenRouter, NVIDIA, and others): set `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` together. Fill in either or both. Do not commit `.env`.
 
 Attach your Word resume in the app. Uploaded resumes are saved locally so you can select them again for later job descriptions; attaching the same file under the same name again reuses its saved entry. The browser always uses the resume you explicitly select. For CLI runs, you can also keep your own Word resume in the ignored `resume/` folder.
 
@@ -21,7 +21,7 @@ Attach your Word resume in the app. Uploaded resumes are saved locally so you ca
 uv run python -m resume_tailor --serve
 ```
 
-Open [the local app](http://127.0.0.1:8787), select or attach a resume, paste the job description, and choose **Tailor resume**. Progress and provider retries appear while the run is active. When a run finishes and passes every check, the browser downloads the verified Word file automatically; the **Download Word resume** button stays on the page in case your browser blocks or asks about automatic downloads. A failed run downloads nothing. Some browsers (Cursor's built-in one, for example) answer a download with their own Save dialog, which a script or an AI driving the page cannot see or click. Set `RESUME_SAVE_DIR` in `.env` (for example `RESUME_SAVE_DIR=~/Downloads`; `~` and variables such as `$HOME` are expanded, and a relative path is taken from the project folder) and the server writes the verified file there itself, shows where it went, and skips the browser download; the path is `saved_to` in the run's result. A file already in that folder is never replaced (the copy becomes `name (1).docx`), and if the folder cannot be written the run keeps its normal download and says so in its warnings. Only the server's own settings choose the folder; a request cannot. An optional second pass polishes the first result. Saved resumes and previous jobs sit in collapsed lists above the form, and recent jobs retain their own verified download links.
+Open [the local app](http://127.0.0.1:8787), select or attach a resume, paste the job description, pick the AI model, and choose **Tailor resume**. The **AI model** panel switches between Claude and OpenRouter and lists the Claude models with a one-line note on each; the browser remembers your choice. If the chosen service's key is missing from `.env`, the page says so instead of running. Each job in **Previous jobs** shows the model that wrote it, and each run's `CHANGELOG.md` names it too. Progress and provider retries appear while the run is active. When a run finishes and passes every check, the browser downloads the verified Word file automatically; the **Download Word resume** button stays on the page in case your browser blocks or asks about automatic downloads. A failed run downloads nothing. Some browsers (Cursor's built-in one, for example) answer a download with their own Save dialog, which a script or an AI driving the page cannot see or click. Set `RESUME_SAVE_DIR` in `.env` (for example `RESUME_SAVE_DIR=~/Downloads`; `~` and variables such as `$HOME` are expanded, and a relative path is taken from the project folder) and the server writes the verified file there itself, shows where it went, and skips the browser download; the path is `saved_to` in the run's result. A file already in that folder is never replaced (the copy becomes `name (1).docx`), and if the folder cannot be written the run keeps its normal download and says so in its warnings. Only the server's own settings choose the folder; a request cannot. An optional second pass polishes the first result. Saved resumes and previous jobs sit in collapsed lists above the form, and recent jobs retain their own verified download links.
 
 ## What the checks do
 
@@ -34,6 +34,7 @@ Open [the local app](http://127.0.0.1:8787), select or attach a resume, paste th
 - **Contact details**, including the name, location, and separate LinkedIn, GitHub, and website links, are restored from the original when altered. The job-title headline, whether it sits above or below the contact line, may only be narrowed or reordered using words already in your original headline (for example "Sr. AI/ML Engineer / Data Scientist" may become "ML Engineer"). A headline that adds a new word, such as the job's own title or program name ("… – AI Strategic Plan & Prototype Development"), gets your original headline back with a warning and the run continues; a resume with no headline does not gain one. This check recognises a headline by its job-title word (Engineer, Scientist, Developer, and similar), so a headline without one is not covered. A header line that also carries contact details, a location, or other segments (for example "Data Engineer | Dallas, TX") stays exactly as written, and no header line may add a location or work authorization (for example "(US Citizen)", "Newark, NJ", "Open to C2C").
 - **Polish preserves skills, points, and every matched JD keyword.** A first-pass skill or point the second pass drops is put back; a second pass that removes a matched JD keyword is discarded.
 - An unchanged or unreadable model reply (including one that only deletes text), one that drops a point, one that empties a whole role or skills section, or one that fails a hard check (for example an added section or a reordered job) gets one corrective retry within the existing time limit. If the first reply's only problem was dropped points that can be restored, and the corrective retry fails for any reason (the request fails, or the reply is unreadable, unchanged, still drops content, or fails a hard check), the first reply is used with those points restored and the warnings say so. Otherwise a retry that still fails ends the run with no download. Content retention is checked again after protected-claim repairs.
+- Claude runs with adaptive thinking at `CLAUDE_THINKING_EFFORT` (default `medium`). On Opus, Sonnet, and Fable, a request Anthropic's safety checks decline is re-run on Anthropic's recommended backup model within the same call (Haiku has no backup). A final refusal, or a reply cut off at `CLAUDE_MAX_TOKENS`, fails the run; partial text is never used.
 - An empty provider reply, a content-filter stop, or a reply the provider marks as failed mid-answer (HTTP 200 with finish reason `error`) is retried like a busy provider; partial text is never used. The final error names the model and the last problem; the `NVIDIA_ENABLE_THINKING` hint appears only for NVIDIA endpoints.
 
 Claim detection uses text patterns. Outside frozen qualification sections, degree checks recognize common degree levels; they do not compare every possible degree subject or institution in prose. Client/project checks recognize explicit labels, standalone names, and relationship phrases such as "for client Northstar". These checks are not exhaustive entity recognition.
@@ -41,6 +42,17 @@ Claim detection uses text patterns. Outside frozen qualification sections, degre
 Timeline checks use a maintained list of case-sensitive tool names and calendar years, not exact release dates. Unknown names, current roles, and roles without recognized dates are not checked against release years. Generic words such as "Lambda" can be mistaken for a tool. See [release-year sources and limits](docs/tool-release-years.md).
 
 Two different numbers are reported. **Keyword coverage** is the share of skill-like words from the job description (Python, AWS, Kubernetes, …) that appear in the final resume; the ones still missing are listed. It is a shape-based guess, so a few non-skills, such as city names, can appear in the missing list, and one-letter languages such as R are not detected. The **model estimate** is the model grading its own rewrite and is usually high. It is withheld when the checks had to change a protected fact or repair a line the model wrote; putting back a skill or point the model dropped does not withhold it. Neither number is an ATS score or a hiring guarantee.
+
+## Choosing a Claude model
+
+| Model | Speed | Rough cost per resume |
+|---|---|---|
+| `claude-opus-5-5` (default) | Moderate | about 15¢ |
+| `claude-sonnet-5-5` | Fast | about 7¢ |
+| `claude-haiku-5-5` | Fastest | under 1¢ |
+| `claude-fable-5-1` | Slow | about 35¢ |
+
+Opus 5.5 is the default because the job is a rewrite under many strict rules (keep every number, title, and date), and following them the first time avoids corrective retries. Haiku is the fastest and cheapest, but check its changes more closely. Fable is the most capable, but slower, and unlikely to beat Opus on a two-page resume; raise `LLM_TOTAL_TIMEOUT` if it runs out of time. Costs are estimates from Anthropic's per-token prices ($4/$20 per million input/output tokens for Opus 5.5, $2/$10 for Sonnet 5.5, $0.10/$0.50 for Haiku 5.5, $10/$50 for Fable 5.1) and a typical resume run; a corrective retry or a polish pass adds another call. The Claude Console's Usage page shows what each run actually cost.
 
 ## Supported Word layouts
 
@@ -57,22 +69,27 @@ uv run python -m resume_tailor --jd path/to/jd.txt
 uv run python -m resume_tailor --jd path/to/jd.txt --two-pass
 uv run python -m resume_tailor --jd path/to/jd.txt --resume path/to/resume.docx
 uv run python -m resume_tailor --jd -
+uv run python -m resume_tailor --jd path/to/jd.txt --provider openrouter
+uv run python -m resume_tailor --jd path/to/jd.txt --model claude-haiku-5-5
 ```
+
+The CLI uses Claude when `CLAUDE_API_KEY` is set (or when neither key is), and OpenRouter when only `LLM_API_KEY` is set. `--provider` overrides that; `--model` picks the model for the chosen service.
 
 Outputs are isolated under `out/runs/<run-id>/`. Each successful run contains a source snapshot, the tailored resume (same file name as the original), a changelog, a diff, the raw model reply, and a digest manifest. `out/latest.json` points to the latest CLI run; failed runs have no resume path. `--out` selects a different output root.
 
 ## HTTP API
 
-`POST /api/tailor` accepts JSON with `jd`, optional `two_pass`, and either a new upload (`resume_b64` and `resume_name`) or a saved `resume_id`. It returns 202 with a run-specific status URL and the saved resume ID. Poll `GET /api/status/<run-id>` until `state` is `complete`, then inspect `result.ok` and `result.download`.
+`POST /api/tailor` accepts JSON with `jd`, optional `two_pass`, optional `provider` (`claude` or `openrouter`) and `model` (one of that service's menu entries from `GET /api/providers`), and either a new upload (`resume_b64` and `resume_name`) or a saved `resume_id`. It returns 202 with a run-specific status URL and the saved resume ID. Poll `GET /api/status/<run-id>` until `state` is `complete`, then inspect `result.ok` and `result.download`.
 
-`GET /api/library` lists saved resumes and `GET /api/runs` lists recent jobs. Uploads are stored under `out/library/resumes/`; each job has a separate source snapshot under `out/runs/`. `GET /api/download/<run-id>` serves only that run's verified artifact. Its digest is rechecked before download. Failed runs and modified files cannot download. `GET /api/health` reports availability without selecting a default resume. Only one run is active at a time; overlapping submissions receive 409.
+`GET /api/providers` lists each service, whether its key is set (never the key itself), and its models. `GET /api/library` lists saved resumes and `GET /api/runs` lists recent jobs with the model each used. Uploads are stored under `out/library/resumes/`; each job has a separate source snapshot under `out/runs/`. `GET /api/download/<run-id>` serves only that run's verified artifact. Its digest is rechecked before download. Failed runs and modified files cannot download. `GET /api/health` reports availability without selecting a default resume. Only one run is active at a time; overlapping submissions receive 409.
 
 Requests must target the local server, and browser requests must use its own origin. Job descriptions are limited to 60,000 characters, request bodies to 8 MB, and attached Word files to 5 MB compressed and 25 MB expanded. Provider attempts share a bounded deadline. A timed-out provider may still finish remotely; late responses cannot publish a result.
 
 ## Implementation
 
 - `structure.py` parses Word paragraphs into typed blocks.
-- `prompt.py` defines the editing rules; `llm.py` handles provider calls, deadlines, parsing, and the corrective retry.
+- `prompt.py` defines the editing rules; `llm.py` handles Chat Completions calls, retries, deadlines, parsing, and the corrective retry.
+- `claude.py` calls Claude through Anthropic's official SDK (streamed, inside the same retries and deadline); `providers.py` picks the service, key, and model for a run.
 - `pipeline.py` shares orchestration between CLI and HTTP, measures keyword coverage, checks the result against the original, and publishes verified artifacts.
 - `guardrails.py` protects identity, work history, qualifications, and numbers, and produces the before/after evidence.
 - `docx_io.py` writes and verifies Word output; `files.py` publishes files atomically.

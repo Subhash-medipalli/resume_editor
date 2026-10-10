@@ -16,9 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
+from resume_tailor import providers
+from resume_tailor.claude import complete as claude_complete
 from resume_tailor.files import new_run_dir, save_copy, write_text
 from resume_tailor.pipeline import run_tailoring, validate_job_description
-from resume_tailor.llm import DEFAULT_BASE_URL, DEFAULT_MODEL, complete, load_dotenv
+from resume_tailor.llm import complete, load_dotenv
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 ROOT = Path.cwd()
@@ -189,14 +191,26 @@ def _snapshot_into_run(run_dir: Path, filename: str, data: bytes) -> Path:
     return dest
 
 
-def _write_run_meta(run_dir: Path, *, source_name: str, resume_id: str, jd: str) -> None:
+def _write_run_meta(run_dir: Path, *, source_name: str, resume_id: str, jd: str, model: str = "") -> None:
     write_text(run_dir / "meta.json", json.dumps({
         "id": run_dir.name,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source_name": source_name,
         "resume_id": resume_id,
         "jd_preview": " ".join(jd.split())[:160],
+        "model": model,
     }))
+
+
+def _chosen_model(payload: dict) -> tuple[str, str]:
+    """The provider and model a request picked from the page's menu, or the defaults."""
+    provider, model = payload.get("provider") or providers.default_provider(), payload.get("model")
+    if not isinstance(provider, str) or provider not in providers.PROVIDERS:
+        raise ValueError("provider must be claude or openrouter.")
+    default, menu = providers.models(provider)
+    if model is not None and (not isinstance(model, str) or model not in menu):
+        raise ValueError("Choose a model from the menu.")
+    return provider, model or default
 
 
 def _list_resumes() -> list[dict]:
@@ -281,12 +295,14 @@ def _list_runs() -> list[dict]:
         source_name = meta.get("source_name") if isinstance(meta.get("source_name"), str) else ""
         preview = meta.get("jd_preview") if isinstance(meta.get("jd_preview"), str) else ""
         resume_id = meta.get("resume_id") if isinstance(meta.get("resume_id"), str) else ""
+        model = meta.get("model") if isinstance(meta.get("model"), str) else ""
         items.append({
             "id": folder.name,
             "created_at": created,
             "source_name": source_name,
             "resume_id": resume_id,
             "jd_preview": preview,
+            "model": model,
             "state": state,
             "ok": ok,
             "download": download,
@@ -302,17 +318,18 @@ def _execute_run(
     out_dir: Path,
     *,
     two_pass: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> dict:
     load_dotenv(ROOT / ".env")
-
-    api_key = os.environ.get("LLM_API_KEY", "").strip()
-    if not api_key:
-        return {"ok": False, "error": "LLM_API_KEY is missing. Put it in .env in the project folder."}
+    try:
+        chosen = providers.settings(provider, model)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
     result = run_tailoring(
         job_description=job_description, resume_path=resume_path, out_dir=out_dir,
-        api_key=api_key, base_url=os.environ.get("LLM_BASE_URL", "").strip() or DEFAULT_BASE_URL,
-        model=os.environ.get("LLM_MODEL", "").strip() or DEFAULT_MODEL,
-        complete_fn=complete,
+        api_key=chosen["api_key"], base_url=chosen["base_url"], model=chosen["model"],
+        complete_fn=claude_complete if chosen["provider"] == "claude" else complete,
         progress=lambda message: _write_progress(out_dir, message),
         two_pass=two_pass,
     )
@@ -361,12 +378,14 @@ def _finish_run(
     run_dir: Path,
     resume_id: str,
     two_pass: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> None:
     global _ACTIVE_RUN_ID
     status = None
     try:
         try:
-            result = _execute_run(jd, snapshot, run_dir, two_pass=two_pass)
+            result = _execute_run(jd, snapshot, run_dir, two_pass=two_pass, provider=provider, model=model)
         except Exception as exc:
             result = {"ok": False, "error": str(exc), "download": None, "run_id": run_dir.name}
         result["resume_id"] = resume_id
@@ -477,6 +496,11 @@ class Handler(BaseHTTPRequestHandler):
             status, body, ctype = _json_bytes({"runs": _list_runs()})
             self._send(status, body, ctype)
             return
+        if path == "/api/providers":
+            load_dotenv(ROOT / ".env")  # a key added to .env shows up on the next page load
+            status, body, ctype = _json_bytes(providers.catalog())
+            self._send(status, body, ctype)
+            return
         if path.startswith("/api/status/"):
             run_id = path.removeprefix("/api/status/")
             if not re.fullmatch(r"[0-9a-f]{32}", run_id):
@@ -554,6 +578,7 @@ class Handler(BaseHTTPRequestHandler):
                     two_pass = payload.get("two_pass", False)
                     if not isinstance(two_pass, bool):
                         raise ValueError("two_pass must be true or false.")
+                    provider, model = _chosen_model(payload)
                 except ValueError as exc:
                     self._send(*_json_bytes({"ok": False, "error": str(exc)}, 400))
                     return
@@ -566,12 +591,12 @@ class Handler(BaseHTTPRequestHandler):
                         library_id = _store_library_resume(filename, data, original_name)
                     run_dir = _new_run_dir()
                     snapshot = _snapshot_into_run(run_dir, filename, data)
-                    _write_run_meta(run_dir, source_name=original_name, resume_id=library_id, jd=payload["jd"])
+                    _write_run_meta(run_dir, source_name=original_name, resume_id=library_id, jd=payload["jd"], model=model)
                     _ACTIVE_RUN_ID = run_dir.name
                     write_text(run_dir / "status.json", json.dumps({"state": "working", "message": "Preparing the source resume"}))
                     worker = threading.Thread(
                         target=_finish_run,
-                        args=(payload["jd"], snapshot, run_dir, library_id, two_pass),
+                        args=(payload["jd"], snapshot, run_dir, library_id, two_pass, provider, model),
                         daemon=True,
                     )
                     worker.start()
