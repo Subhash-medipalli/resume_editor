@@ -13,7 +13,7 @@ uv sync
 cp .env.example .env
 ```
 
-Put your API keys in `.env` (see `.env.example`). Claude is the main service: set `CLAUDE_API_KEY` (from the [Claude Console](https://console.anthropic.com)) and optionally `CLAUDE_MODEL`. The alternative is any service that speaks the standard Chat Completions format (OpenRouter, NVIDIA, and others): set `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` together. Fill in either or both. Do not commit `.env`.
+Put your API keys in `.env` (see `.env.example`). Claude is the main service: set `CLAUDE_API_KEY` (from the [Claude Console](https://platform.claude.com)) and optionally `CLAUDE_MODEL`. The alternative is any service that speaks the standard Chat Completions format (OpenRouter, NVIDIA, and others): set `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL` together. Fill in either or both. Do not commit `.env`.
 
 Attach your Word resume in the app. Uploaded resumes are saved locally so you can select them again for later job descriptions; attaching the same file under the same name again reuses its saved entry. The browser always uses the resume you explicitly select. For CLI runs, you can also keep your own Word resume in the ignored `resume/` folder.
 
