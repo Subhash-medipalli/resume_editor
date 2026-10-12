@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
+from resume_tailor import providers
+from resume_tailor.claude import DEFAULT_MODEL as CLAUDE_MODEL, complete as claude_complete
 from resume_tailor.files import check_output_paths, new_run_dir, write_text
 from resume_tailor.llm import (
     DEFAULT_BASE_URL,
@@ -17,14 +18,21 @@ from resume_tailor.llm import (
 )
 from resume_tailor.pipeline import run_tailoring
 
-_MISSING_KEY = """\
-LLM_API_KEY is not set.
+_MISSING_KEY = f"""\
+{{error}}
 
-Put your model settings in a .env file in this folder (see .env.example):
+Put your model settings in a .env file in this folder (see .env.example).
+
+Claude (the main service):
+
+  CLAUDE_API_KEY=<your key from the Claude Console>
+  CLAUDE_MODEL={CLAUDE_MODEL}
+
+OpenRouter (the alternative; pass --provider openrouter):
 
   LLM_API_KEY=<your OpenRouter key>
-  LLM_BASE_URL=https://openrouter.ai/api/v1
-  LLM_MODEL=google/gemini-3.8-flash
+  LLM_BASE_URL={DEFAULT_BASE_URL}
+  LLM_MODEL={DEFAULT_MODEL}
 
 Never commit .env.
 """
@@ -43,9 +51,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write("error: --jd is required (or pass --serve).\n")
         return 2
 
-    api_key = os.environ.get("LLM_API_KEY", "").strip()
-    if not api_key:
-        sys.stderr.write(_MISSING_KEY)
+    try:
+        chosen = providers.settings(args.provider, args.model)
+    except ValueError as exc:
+        sys.stderr.write(_MISSING_KEY.format(error=exc))
         return 2
 
     try:
@@ -55,12 +64,6 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     out_dir = Path(args.out)
-    base_url = (
-        args.base_url
-        or os.environ.get("LLM_BASE_URL", "").strip()
-        or DEFAULT_BASE_URL
-    )
-    model = args.model or os.environ.get("LLM_MODEL", "").strip() or DEFAULT_MODEL
 
     try:
         resume_path = _resolve_resume(args.resume)
@@ -71,8 +74,8 @@ def main(argv: list[str] | None = None) -> int:
         write_text(out_dir / "latest.json", json.dumps({"run": str(run_dir), "status": "working"}), sources=protected)
         result = run_tailoring(
             job_description=job_description, resume_path=resume_path, out_dir=run_dir,
-            api_key=api_key, base_url=base_url, model=model,
-            complete_fn=complete,
+            api_key=chosen["api_key"], base_url=args.base_url or chosen["base_url"], model=chosen["model"],
+            complete_fn=claude_complete if chosen["provider"] == "claude" else complete,
             protected_sources=protected,
             progress=lambda message: print(message, file=sys.stderr),
             two_pass=args.two_pass,
@@ -142,14 +145,20 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Port for --serve (default: 8787).",
     )
     parser.add_argument(
+        "--provider",
+        choices=sorted(providers.PROVIDERS),
+        default=None,
+        help="Service that writes the resume (default: claude, or openrouter when only LLM_API_KEY is set).",
+    )
+    parser.add_argument(
         "--model",
         default=None,
-        help=f"Model name (default: LLM_MODEL or {DEFAULT_MODEL}).",
+        help=f"Model name (default: CLAUDE_MODEL or {CLAUDE_MODEL}; with openrouter, LLM_MODEL or {DEFAULT_MODEL}).",
     )
     parser.add_argument(
         "--base-url",
         default=None,
-        help=f"Chat Completions API base URL (default: LLM_BASE_URL or {DEFAULT_BASE_URL}).",
+        help=f"OpenRouter only: Chat Completions API base URL (default: LLM_BASE_URL or {DEFAULT_BASE_URL}).",
     )
     return parser.parse_args(argv)
 

@@ -22,6 +22,15 @@
     textarea { display:block; width:100%; min-height:260px; padding:14px; border:1.5px solid var(--line); border-radius:10px; font:15px/1.5 inherit; color:var(--ink); resize:vertical; }
     textarea:focus { outline:none; border-color:var(--blue); box-shadow:0 0 0 3px rgba(21,93,252,.15); }
     .options { margin-top:16px; }
+    .model { margin-bottom:12px; }
+    .model .pick { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .tabs { display:inline-flex; border:1.5px solid var(--line); border-radius:10px; overflow:hidden; }
+    .tabs button { appearance:none; border:0; background:transparent; color:var(--ink); padding:8px 14px; font:600 14px/1.2 inherit; cursor:pointer; }
+    .tabs button[aria-pressed="true"] { background:var(--blue); color:#fff; }
+    .tabs button:focus-visible, select:focus-visible { outline:2px solid var(--blue); outline-offset:2px; }
+    select { font:14px/1.2 inherit; padding:8px 10px; border:1.5px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); max-width:100%; }
+    .model .help { margin:8px 0 0; }
+    .model .err { margin-top:8px; }
     .check { display:flex; gap:9px; align-items:flex-start; font-weight:400; margin:0 0 8px; }
     .row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:16px; flex-wrap:wrap; }
     .kbd { color:var(--muted); font-size:13px; }
@@ -103,6 +112,15 @@
     <input type="file" id="file" accept=".docx" />
     <div class="fileline" id="fileline" hidden></div>
     <div class="options">
+      <div class="model" id="modelBox" hidden>
+        <label for="model">AI model</label>
+        <div class="pick">
+          <div class="tabs" id="providerTabs" role="group" aria-label="Service"></div>
+          <select id="model"></select>
+        </div>
+        <p class="help" id="modelNote"></p>
+        <p class="err" id="keyWarn" role="alert" hidden></p>
+      </div>
       <label class="check"><input type="checkbox" id="twoPass" /> Use a second polish pass (slower)</label>
     </div>
     <div class="row">
@@ -157,6 +175,9 @@
   const $ = (id) => document.getElementById(id);
   const show = (id) => { for (const s of ["enter","working","result"]) $(s).hidden = s !== id; window.scrollTo({top:0, behavior:"smooth"}); };
   let attached = null, tick = null, running = false, readingFile = false, selectedId = null, libraryItems = [];
+  let catalog = null, provider = null;
+  const readPref = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
+  const savePref = (key, value) => { try { localStorage.setItem(key, value); } catch {} };
   const DOWNLOAD_RE = /^\/api\/download\/[0-9a-f]{32}$/;
 
   function loadHistory() {
@@ -214,7 +235,7 @@
       const label = document.createElement("span");
       label.className = "label";
       const when = (run.created_at || "").replace("T", " ").replace("+00:00", " UTC");
-      label.textContent = [when, run.source_name, run.jd_preview].filter(Boolean).join(" · ");
+      label.textContent = [when, run.model, run.source_name, run.jd_preview].filter(Boolean).join(" · ");
       li.appendChild(label);
       if (run.download && DOWNLOAD_RE.test(run.download)) {
         const link = document.createElement("a");
@@ -250,8 +271,37 @@
     $("go").disabled = busy;
     $("pick").disabled = busy;
     $("twoPass").disabled = busy;
+    $("model").disabled = busy;
     for (const button of $("resumes").querySelectorAll("button")) button.disabled = busy;
+    for (const button of $("providerTabs").querySelectorAll("button")) button.disabled = busy;
   }
+
+  // The model panel: a tab per service, a menu of its models, remembered in this browser.
+  function renderModels() {
+    const tabs = $("providerTabs"); tabs.textContent = "";
+    for (const p of catalog.providers) {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = p.label; b.setAttribute("aria-pressed", String(p === provider));
+      b.onclick = () => { provider = p; savePref("provider", p.id); renderModels(); };
+      tabs.appendChild(b);
+    }
+    const select = $("model"); select.textContent = "";
+    for (const m of provider.models) { const o = document.createElement("option"); o.value = o.textContent = m.id; select.appendChild(o); }
+    const saved = readPref("model:" + provider.id);
+    select.value = provider.models.some((m) => m.id === saved) ? saved : provider.default_model;
+    noteModel();
+    $("keyWarn").textContent = provider.key + " is missing from .env, so " + provider.label + " can't run. Add it to .env and reload this page, or pick the other service.";
+    $("keyWarn").hidden = provider.ready;
+    $("modelBox").hidden = false;
+    updateControls();
+  }
+  function noteModel() { const m = provider.models.find((m) => m.id === $("model").value); $("modelNote").textContent = m ? m.note : ""; }
+  $("model").onchange = () => { savePref("model:" + provider.id, $("model").value); noteModel(); };
+  fetch("/api/providers").then((r) => r.json()).then((data) => {
+    catalog = data;
+    provider = data.providers.find((p) => p.id === readPref("provider")) || data.providers.find((p) => p.id === data.default) || data.providers[0];
+    renderModels();
+  }).catch(() => {});
 
   loadHistory();
 
@@ -317,6 +367,7 @@
     if (!jd) { $("err").textContent = "Paste a job description first."; $("err").hidden = false; return; }
     if (jd.length > 60000) { $("err").textContent = "Job description is too long (maximum 60,000 characters)."; $("err").hidden = false; return; }
     if (!attached && !selectedId) { $("err").textContent = "Upload a .docx base resume, or choose a saved one."; $("err").hidden = false; return; }
+    if (provider && !provider.ready) { $("err").textContent = "Can't run yet: see the AI model note above."; $("err").hidden = false; return; }
     running = true; updateControls();
     $("dl").hidden = true; $("dl").removeAttribute("href"); $("dlnote").hidden = true;
     $("err").hidden = true; $("timer").textContent = "0:00"; show("working");
@@ -324,6 +375,7 @@
     const t0 = Date.now(); clearInterval(tick);
     tick = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $("timer").textContent = `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`; }, 500);
     const payload = { jd, two_pass: $("twoPass").checked };
+    if (provider) { payload.provider = provider.id; payload.model = $("model").value; }
     if (attached) { payload.resume_b64 = attached.b64; payload.resume_name = attached.name; }
     else payload.resume_id = selectedId;
     let data;

@@ -9,7 +9,8 @@ def _no_real_provider_settings(monkeypatch):
     monkeypatch.setattr("resume_tailor.cli.load_dotenv", lambda *_: None)
     monkeypatch.setattr("resume_tailor.server.load_dotenv", lambda *_: None)
     for key in ("LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL", "LLM_MAX_TOKENS", "RESUME_SAVE_DIR",
-                "LLM_TIMEOUT", "LLM_TOTAL_TIMEOUT", "NVIDIA_ENABLE_THINKING"):
+                "LLM_TIMEOUT", "LLM_TOTAL_TIMEOUT", "NVIDIA_ENABLE_THINKING",
+                "CLAUDE_API_KEY", "CLAUDE_MODEL", "CLAUDE_MAX_TOKENS", "CLAUDE_THINKING_EFFORT"):
         monkeypatch.delenv(key, raising=False)
 
 

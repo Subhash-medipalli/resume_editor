@@ -191,7 +191,9 @@ def test_changed_result_cannot_be_downloaded(api, tmp_path):
 
 @pytest.mark.parametrize(
     "payload",
-    [["not an object"], {"jd": 123}, {"jd": ""}, {"jd": "Python", "two_pass": "yes"}],
+    [["not an object"], {"jd": 123}, {"jd": ""}, {"jd": "Python", "two_pass": "yes"},
+     {"jd": "Python", "provider": "gemini"}, {"jd": "Python", "provider": ["claude"]},
+     {"jd": "Python", "provider": "claude", "model": "gpt-9"}, {"jd": "Python", "model": {"id": "x"}}],
 )
 def test_invalid_request_is_rejected_before_allocating_a_run(api, tmp_path, payload):
     assert api("POST", "/api/tailor", payload)[0] == 400
@@ -586,3 +588,29 @@ def test_a_failed_run_saves_nothing(api, monkeypatch, tmp_path):
     _, failed = api("POST", "/api/tailor", {"jd": "Python"})
     assert not failed["ok"] and "saved_to" not in failed
     assert not (tmp_path / "saved").exists()
+
+
+def test_the_model_panel_lists_each_service_without_its_key(api, monkeypatch):
+    monkeypatch.setenv("CLAUDE_API_KEY", "sk-ant-secret")
+    status, body = api("GET", "/api/providers")
+    assert status == 200 and body["default"] == "claude"
+    assert [(p["id"], p["ready"]) for p in body["providers"]] == [("claude", True), ("openrouter", True)]
+    assert "sk-ant-secret" not in json.dumps(body) and "fake-no-network" not in json.dumps(body)
+
+
+def test_a_run_uses_the_chosen_claude_model_and_records_it(api, monkeypatch):
+    monkeypatch.setenv("CLAUDE_API_KEY", "fake-no-network")
+    models = []
+    monkeypatch.setattr(server, "claude_complete", lambda messages, **kw: models.append(kw["model"]) or reply(messages))
+    monkeypatch.setattr(server, "complete", lambda *a, **k: pytest.fail("OpenRouter must not run"))
+    status, result = api("POST", "/api/tailor", {"jd": "Python", "provider": "claude", "model": "claude-haiku-5-5"})
+    assert status == 200 and result["ok"], result
+    assert models == ["claude-haiku-5-5"]
+    assert "**Model:** claude-haiku-5-5" in result["changelog"]
+    assert api("GET", "/api/runs")[1]["runs"][0]["model"] == "claude-haiku-5-5"
+
+
+def test_a_missing_claude_key_fails_the_run_and_names_the_setting(api, monkeypatch):
+    monkeypatch.setattr(server, "claude_complete", lambda *a, **k: pytest.fail("no key, no request"))
+    status, result = api("POST", "/api/tailor", {"jd": "Python", "provider": "claude"})
+    assert not result["ok"] and "CLAUDE_API_KEY" in result["error"]

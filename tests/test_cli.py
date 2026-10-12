@@ -21,6 +21,7 @@ def test_missing_api_key_exits_2(monkeypatch, capsys, tmp_path):
     assert "LLM_API_KEY" in err
     assert "LLM_BASE_URL" in err
     assert "LLM_MODEL" in err
+    assert "CLAUDE_API_KEY" in err
 
 
 def test_cli_writes_new_file_and_leaves_source_untouched(monkeypatch, tmp_path, capsys):
@@ -201,3 +202,20 @@ def test_explicit_project_markdown_is_not_replaced_by_default_word(tmp_path, mon
     assert pipeline._load_source_text(source) == SAMPLE_RESUME
     paths, parent = pipeline._output_paths(source, tmp_path / "out")
     assert parent is None and "word" not in paths
+
+
+def test_cli_uses_claude_when_its_key_is_set(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_API_KEY", "fake")
+    monkeypatch.setenv("LLM_API_KEY", "fake")
+    resume, jd, out = tmp_path / "resume.md", tmp_path / "jd.txt", tmp_path / "out"
+    resume.write_text(SAMPLE_RESUME, encoding="utf-8")
+    jd.write_text("Need a Python/AWS contractor for REST APIs on EC2.\n", encoding="utf-8")
+    raw = pack_model_output(changelog=["Retargeted summary"], match="good: Python/AWS",
+                            resume=lightly_tailored(SAMPLE_RESUME))
+    models = []
+    monkeypatch.setattr("resume_tailor.cli.claude_complete", lambda messages, **kw: models.append(kw["model"]) or raw)
+    monkeypatch.setattr("resume_tailor.cli.complete", lambda messages, **kw: models.append("openrouter") or raw)
+    assert main(["--jd", str(jd), "--resume", str(resume), "--out", str(out), "--model", "claude-sonnet-5-5"]) == 0
+    assert "**Model:** claude-sonnet-5-5" in run_output(out, "CHANGELOG.md").read_text(encoding="utf-8")
+    assert main(["--jd", str(jd), "--resume", str(resume), "--out", str(out), "--provider", "openrouter"]) == 0
+    assert models == ["claude-sonnet-5-5", "openrouter"]

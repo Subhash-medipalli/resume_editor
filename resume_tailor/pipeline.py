@@ -194,7 +194,7 @@ def run_tailoring(
 
         changelog = _render_changelog(
             match_line=match_line, match_score=score, score_note=score_note, changes=changes,
-            report=report, resume_path=written or resume_path, coverage=coverage,
+            report=report, resume_path=written or resume_path, coverage=coverage, model=model,
         )
         write_text(out_dir / "CHANGELOG.md", changelog, sources=sources)
         write_text(out_dir / "resume.diff", diff_text or "(no changes)\n", sources=sources)
@@ -233,7 +233,7 @@ def run_tailoring(
             if dest is not None:
                 check_output_paths(sources, [dest])
                 dest.unlink(missing_ok=True)
-        error = f"Run failed: {exc}\nSource resume left unchanged. No result was published.\n"
+        error = f"Run failed: {exc}\nSource resume left unchanged. No result was published.\nModel: {model}\n"
         write_text(out_dir / "CHANGELOG.md", error, sources=sources)
         return {
             "ok": False,
@@ -330,8 +330,9 @@ def _render_changelog(
     report: GuardrailReport,
     resume_path: Path,
     coverage: dict,
+    model: str = "",
 ) -> str:
-    lines = ["# Changelog", ""]
+    lines = ["# Changelog", "", f"**Model:** {model}", ""] if model else ["# Changelog", ""]
     if match_score is not None:
         lines += [f"**Model-estimated match:** {match_score} / 100", ""]
     if score_note:
